@@ -19,5 +19,8 @@
   },
   "1.3.2": {
     "en": "Zigbee Visualizer is now called Network Visualizer, since the plan is to draw Thread and Matter networks too. The raw network dump now also asks Homey for the Z-Wave mesh, so shared dumps show whether your Homey allows reading it."
+  },
+  "1.4.0": {
+    "en": "• Thread & Matter and Z-Wave: pick the network at the top of the settings page and the browser view, or in the widget's settings.\n• Thread & Matter: every Thread device with its route to Homey and the quality of each link, named after your Matter devices. Matter devices on Wi-Fi or Ethernet are shown too, straight from Homey.\n• Z-Wave: every device, graded by how many of Homey's messages got through. Homey doesn't let apps read the Z-Wave routes, so each device is drawn straight from Homey.\n• Snapshot history now also covers Thread, with its own Changes tab and route history.\n• The browser view's Load dialog also opens a raw dump of every network."
   }
 }
