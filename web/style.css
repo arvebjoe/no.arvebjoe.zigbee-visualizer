@@ -26,6 +26,9 @@
 
 * { box-sizing: border-box; }
 
+/* Panes and toggles set their own display, which would otherwise win over the hidden attribute. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   height: 100vh;
@@ -47,6 +50,13 @@ body {
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
 }
+/* The network picker comes first: everything else on the page is about the network it names. */
+.network-pick {
+  background: var(--bg-elev-2); border: 1px solid var(--accent-dim); color: var(--text);
+  border-radius: 6px; padding: 7px 10px; font-size: 14px; font-weight: 600; cursor: pointer;
+}
+.network-pick:hover, .network-pick:focus { border-color: var(--accent); outline: none; }
+.network-pick:disabled { opacity: .6; cursor: progress; }
 .brand { display: flex; align-items: baseline; gap: 10px; }
 .brand button {
   align-self: center; background: var(--bg-elev-2); border: 1px solid var(--border);
@@ -95,6 +105,12 @@ main { flex: 1 1 auto; display: flex; min-height: 0; }
   font-size: 11px; color: var(--text-dim); background: rgba(22,27,34,.85);
   padding: 6px 12px; border-radius: 20px; border: 1px solid var(--border);
   pointer-events: none; transition: opacity .3s; max-width: 70%; text-align: center;
+}
+/* What the map can't show for this network, e.g. that Z-Wave's routes are hidden from apps. */
+.map-notice {
+  position: absolute; top: 14px; right: 14px; max-width: 340px;
+  font-size: 11px; line-height: 1.5; color: var(--warn); background: rgba(22,27,34,.92);
+  padding: 8px 12px; border-radius: 8px; border: 1px solid #6b5320;
 }
 .hint.ok { color: var(--accent); border-color: var(--accent-dim); }
 .hint.warn { color: var(--warn); border-color: #6b5320; }

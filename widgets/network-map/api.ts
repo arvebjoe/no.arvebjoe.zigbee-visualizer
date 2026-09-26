@@ -6,7 +6,7 @@ import { buildWidgetView } from '../../lib/widget-view';
 
 /** The app instance, as far as this widget needs it. */
 type NetworkVisualizerApp = {
-  getZigbeeGraph(): Promise<Graph>;
+  getGraph(network: unknown): Promise<Graph>;
 };
 
 type WidgetRequest = {
@@ -17,13 +17,13 @@ type WidgetRequest = {
 module.exports = {
 
   /**
-   * GET /?ghosts=1
-   * The network laid out for the dashboard map. `ghosts=1` keeps the stale
-   * route entries in the picture.
+   * GET /?network=thread&ghosts=1
+   * One network laid out for the dashboard map: zigbee (the default), thread
+   * or zwave. `ghosts=1` keeps Zigbee's stale route entries in the picture.
    */
   async getView({ homey, query }: WidgetRequest) {
     const app = homey.app as unknown as NetworkVisualizerApp;
-    return buildWidgetView(await app.getZigbeeGraph(), { ghosts: query.ghosts === '1' });
+    return buildWidgetView(await app.getGraph(query.network), { ghosts: query.ghosts === '1' });
   },
 
 };

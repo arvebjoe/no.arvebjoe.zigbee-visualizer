@@ -12,8 +12,8 @@ import path from 'path';
 export type WebServerOptions = {
   port: number;
   log: (message: string) => void;
-  /** The live network as a graph, built fresh for every request. */
-  getGraph: () => Promise<unknown>;
+  /** One live network as a graph, built fresh for every request: 'zigbee', 'thread' or 'zwave'. */
+  getGraph: (network: string | null) => Promise<unknown>;
   /** Every saved snapshot, oldest first, with the interval the page needs to label them. */
   listSnapshots: () => Promise<unknown>;
   /** One snapshot or imported dump as a graph, or null if there is no such thing. */
@@ -29,6 +29,7 @@ export type WebServerOptions = {
   /**
    * Strips a dump the user loaded of its secrets and builds its graph, keeping
    * it when `remember` is set; resolves to null when it is not a Zigbee dump.
+   * A network probe comes back as one graph per network in it, and is never kept.
    */
   importDump: (input: unknown, remember: boolean) => Promise<unknown | null>;
   /** Deletes one imported dump; false when there is no such import. */
@@ -118,14 +119,14 @@ function serveFile(req: http.IncomingMessage, res: http.ServerResponse) {
 }
 
 /** Answers with the live network as a graph. */
-function serveGraph(res: http.ServerResponse, { getGraph, log }: WebServerOptions) {
-  getGraph()
+function serveGraph(res: http.ServerResponse, network: string | null, { getGraph, log }: WebServerOptions) {
+  getGraph(network)
     .then((graph) => {
       send(res, 200, 'application/json; charset=utf-8', JSON.stringify(graph));
     })
     .catch((err: Error) => {
-      log(`Could not read the Zigbee state: ${err.message}`);
-      send(res, 502, 'text/plain; charset=utf-8', 'Could not read the Zigbee state');
+      log(`Could not read the ${network ?? 'zigbee'} state: ${err.message}`);
+      send(res, 502, 'text/plain; charset=utf-8', 'Could not read the network from Homey');
     });
 }
 
@@ -298,7 +299,7 @@ function serveImport(
   readJson(req, DUMP_LIMIT).then(
     (input) => importDump(input, remember).then(
       (result) => {
-        if (result === null) send(res, 400, 'text/plain; charset=utf-8', 'That does not look like a Homey Zigbee dump');
+        if (result === null) send(res, 400, 'text/plain; charset=utf-8', 'That does not look like a Homey Zigbee dump or network probe');
         else send(res, 200, 'application/json; charset=utf-8', JSON.stringify(result));
       },
       (err: Error) => {
@@ -343,7 +344,7 @@ export function startWebServer(options: WebServerOptions): http.Server {
       send(res, 405, 'text/plain; charset=utf-8', 'Method not allowed');
       return;
     }
-    if (pathname === '/api/graph') serveGraph(res, options);
+    if (pathname === '/api/graph') serveGraph(res, url.searchParams.get('network'), options);
     else if (snapshot) serveSnapshots(res, snapshot[1], options);
     else if (imported?.[1]) serveSnapshots(res, imported[1], options);
     else if (imported) serveImports(res, options);

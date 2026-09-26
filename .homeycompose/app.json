@@ -32,7 +32,7 @@
     "homey:manager:api"
   ],
   "api": {
-    "getZigbeeGraph": {
+    "getGraph": {
       "method": "GET",
       "path": "/network"
     },

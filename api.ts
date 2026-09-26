@@ -5,7 +5,7 @@ import type Homey from 'homey';
 /** The app instance, as far as this API surface needs it. */
 type NetworkVisualizerApp = {
   getZigbeeState(): Promise<unknown>;
-  getZigbeeGraph(): Promise<unknown>;
+  getGraph(network: unknown): Promise<unknown>;
   getVisualizerUrl(): Promise<string>;
 };
 
@@ -28,11 +28,12 @@ module.exports = {
   },
 
   /**
-   * GET /api/app/no.arvebjoe.network-visualizer/network
-   * The parsed graph model the settings page renders.
+   * GET /api/app/no.arvebjoe.network-visualizer/network?network=thread
+   * The graph model the settings page renders, of one network: zigbee (the
+   * default), thread or zwave.
    */
-  async getZigbeeGraph(request: ApiRequest) {
-    return app(request).getZigbeeGraph();
+  async getGraph(request: ApiRequest) {
+    return app(request).getGraph(request.query.network);
   },
 
   /**

@@ -1,9 +1,37 @@
 {
   "name": {
-    "en": "Zigbee map"
+    "en": "Network map"
   },
   "height": "100%",
   "settings": [
+    {
+      "id": "network",
+      "type": "dropdown",
+      "title": {
+        "en": "Network"
+      },
+      "value": "zigbee",
+      "values": [
+        {
+          "id": "zigbee",
+          "title": {
+            "en": "Zigbee"
+          }
+        },
+        {
+          "id": "thread",
+          "title": {
+            "en": "Thread & Matter"
+          }
+        },
+        {
+          "id": "zwave",
+          "title": {
+            "en": "Z-Wave"
+          }
+        }
+      ]
+    },
     {
       "id": "shape",
       "type": "dropdown",
@@ -72,7 +100,7 @@
       "id": "ghosts",
       "type": "checkbox",
       "title": {
-        "en": "Show stale routes"
+        "en": "Show stale routes (Zigbee)"
       },
       "value": false
     },

@@ -166,22 +166,26 @@
 
       // ------------------------------------------------------------- data --
 
+      function networkName() {
+        return { thread: 'Thread & Matter', zwave: 'Z-Wave' }[state.settings.network] || 'Zigbee';
+      }
+
       function load() {
-        var query = state.settings.ghosts ? '/?ghosts=1' : '/';
+        var query = '/?network=' + (state.settings.network || 'zigbee') + (state.settings.ghosts ? '&ghosts=1' : '');
         return state.homey.api('GET', query)
           .then(function (view) {
             state.view = view;
             state.byAddr = {};
             view.nodes.forEach(function (n) { state.byAddr[n.addr] = n; });
             if (state.selected != null && !state.byAddr[state.selected]) state.selected = null;
-            showMessage(view.nodes.length > 1 ? '' : 'No Zigbee devices yet.');
+            showMessage(view.nodes.length > 1 ? '' : 'No ' + networkName() + ' devices yet.');
             if (view.error) showMessage('Controller reports: ' + view.error);
             render();
           })
           .catch(function (err) {
             // Keep the last map if there is one; a refresh that fails says so only
             // when there is nothing else to show.
-            if (!state.view) showMessage('Could not read the Zigbee network: ' + ((err && err.message) || err));
+            if (!state.view) showMessage('Could not read the ' + networkName() + ' network: ' + ((err && err.message) || err));
           });
       }
 
@@ -353,9 +357,9 @@
         if (n.shape !== 'controller' && n.hops != null) {
           var grade = document.createElement('span');
           grade.className = 'q-text-' + n.grade;
-          grade.textContent = ' · ' + (n.rate == null || n.grade === 'unknown'
+          grade.textContent = ' · ' + (!n.label || n.label === '—' || n.grade === 'unknown'
             ? GRADE_LABEL.unknown.toLowerCase()
-            : Math.round(n.rate * 100) + '%');
+            : n.label);
           box.appendChild(grade);
         }
         box.hidden = false;

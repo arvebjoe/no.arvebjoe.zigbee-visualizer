@@ -3,11 +3,57 @@
 const HOP_COLORS = ['#f0f6fc', '#4dd4ac', '#58a6ff', '#bc8cff', '#ff8fab'];
 const GHOST_COLOR = '#6e7681';
 
-// Link quality, derived from the TX success counters of the device at the far
-// end of each hop. The Homey grades them, in lib/zigbee-graph.ts.
+// Link quality. The Homey grades every hop (lib/zigbee-graph.ts and its
+// siblings) and hands each link a label and a sentence, so the page never has
+// to know how a network measures its hops.
 const GRADE_LABEL = {
-  good: 'Good', fair: 'Fair', weak: 'Weak', bad: 'Bad', unknown: 'Too little traffic',
+  good: 'Good', fair: 'Fair', weak: 'Weak', bad: 'Bad', unknown: 'Unknown',
 };
+
+// What each network can show, and how its hops are graded, for the legend and the Link quality tab.
+const NETWORKS = {
+  zigbee: {
+    label: 'Zigbee',
+    tabs: ['quality', 'traffic', 'changes'],
+    history: true,
+    legend: [['good', 'Good — 95%+ TX success'], ['fair', 'Fair — 85–95%'], ['weak', 'Weak — 70–85%'],
+      ['bad', 'Bad — under 70%'], ['unknown', 'Too little traffic to judge']],
+    legendNote: 'Line thickness = traffic volume',
+    measured: `The dump carries no LQI or signal strength. Each device does report how many of
+      its transmissions succeeded, and because every device has exactly one parent relay, that
+      success rate describes its link to that parent. A router's counters also include traffic it
+      forwards to its own children, so read a router's grade as "this branch is struggling" rather
+      than one exact hop.`,
+  },
+  thread: {
+    label: 'Thread & Matter',
+    tabs: ['quality'],
+    history: false,
+    legend: [['good', 'Good — link quality 3 of 3'], ['fair', 'Fair — 2 of 3'], ['weak', 'Weak — 1 of 3'],
+      ['bad', 'Bad — 0 of 3'], ['unknown', 'Not reported']],
+    legendNote: 'Wi-Fi devices: by signal strength',
+    measured: `Thread devices that support Matter's network diagnostics report every router they
+      hear, with the link quality both ways (0–3) and the signal strength. Thread routes along the
+      cheapest path, where a better link costs less, so each device's route here is the cheapest
+      path to Homey through the links they report. Routers that aren't Matter devices of this
+      Homey, and sleepy devices that don't answer, report nothing of their own: their links are
+      what their neighbours saw. Matter devices on Wi-Fi or Ethernet aren't part of the mesh and
+      are drawn straight from Homey.`,
+  },
+  zwave: {
+    label: 'Z-Wave',
+    tabs: ['quality', 'traffic'],
+    history: false,
+    legend: [['good', 'Good — 95%+ TX success'], ['fair', 'Fair — 85–95%'], ['weak', 'Weak — 70–85%'],
+      ['bad', 'Bad — under 70%'], ['unknown', 'Too little traffic to judge']],
+    legendNote: 'Line thickness = traffic volume',
+    measured: `Homey counts how many of its transmissions to each device got through, and that
+      success rate is the grade. Homey doesn't let apps read the Z-Wave routes, so the grade is for
+      the whole way to the device, over however many repeaters it takes.`,
+  },
+};
+
+const NETWORK_KEY = 'zigbee-visualizer.network';
 const GRADE_ORDER = ['bad', 'weak', 'fair', 'good', 'unknown'];
 
 // Cluster ids we are likely to meet in a Homey network, for readable endpoints.
@@ -48,6 +94,9 @@ const CLUSTERS = {
 };
 
 const state = {
+  network: 'zigbee',
+  // A loaded network probe: one graph per network in it, drawn instead of the live ones until "Back to live".
+  probe: null,
   graph: null,
   byAddr: new Map(),
   selected: null,
@@ -62,6 +111,11 @@ const state = {
   changes: null, // what moved since the snapshot before the one on screen (see diffGraphs)
   keepView: false, // true while a snapshot is swapped in: keep the current zoom and position
 };
+
+// The history pane's state; the pane itself is further down.
+let historyActive = ''; // '' is live, 'import' a loaded dump, otherwise the id of the snapshot on screen
+let historySnapshots = null; // every snapshot, oldest first, as last reported by the app
+let historySettings = null; // the snapshot settings, as last reported by the app
 
 const svg = d3.select('#canvas');
 const root = svg.append('g');
@@ -113,15 +167,25 @@ function ingest(text, sourceName) {
   } catch (err) {
     return Promise.reject(new Error(`That is not valid JSON — ${err.message}`));
   }
-  if (!dump || typeof dump !== 'object' || (!dump.nodes && !dump.controllerState)) {
+  const isProbe = Boolean(dump && dump.probe && dump.networks);
+  if (!dump || typeof dump !== 'object' || (!isProbe && !dump.nodes && !dump.controllerState)) {
     return Promise.reject(new Error('No "nodes" or "controllerState" in there — that does not look like a Homey Zigbee dump.'));
   }
 
-  const remember = rememberBox.checked;
+  // A probe is never kept: it is a snapshot of every network, for looking at once.
+  const remember = rememberBox.checked && !isProbe;
   return getJson(`api/imports${remember ? '?remember=1' : ''}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text,
-  }).then(({ graph, stripped, id }) => {
+  }).then(({
+    graph, graphs, stripped, id,
+  }) => {
+    if (graphs) {
+      showProbe(graphs, sourceName);
+      return { stripped, storeError: null };
+    }
     graph.meta.source = sourceName;
+    state.probe = null;
+    setNetwork('zigbee');
     showImport(graph, id);
     const storeError = remember && !id ? 'The Homey could not keep it, so you will have to load it again after a refresh.' : null;
     return { stripped, storeError };
@@ -145,12 +209,106 @@ function show(graph) {
   }
 
   document.getElementById('source').textContent = graph.meta.source || '';
+  document.getElementById('backLive').hidden = !graph.meta.source || graph.meta.source === 'Homey (live)';
+  const notice = document.getElementById('mapNotice');
+  notice.textContent = graph.meta.notice || '';
+  notice.hidden = !graph.meta.notice;
+  renderLegend();
 
   renderStats();
   render();
   if (state.selected && state.byAddr.has(state.selected)) select(state.selected);
   else renderOverview();
 }
+
+// ------------------------------------------------------------ networks ----
+// The picker at the top chooses the network. Live, each one is its own request
+// to the Homey; with a network probe loaded, they all come from the probe.
+
+const networkPick = document.getElementById('network');
+
+/** Sets the picker and everything that only one network has, without loading anything. */
+function setNetwork(network) {
+  if (!NETWORKS[network]) return;
+  if (network !== state.network) {
+    state.selected = null;
+    state.changes = null;
+  }
+  state.network = network;
+  networkPick.value = network;
+  const zigbee = network === 'zigbee';
+  document.getElementById('history').hidden = !NETWORKS[network].history;
+  // Bindings and stale routing entries are Zigbee's alone.
+  document.getElementById('showBindings').closest('label').hidden = !zigbee;
+  document.getElementById('showGhosts').closest('label').hidden = !zigbee;
+  try {
+    localStorage.setItem(NETWORK_KEY, network);
+  } catch { /* ignore */ }
+}
+
+/** The legend's link-quality rows, for the network on screen. */
+function renderLegend() {
+  const { legend, legendNote } = NETWORKS[state.network];
+  document.getElementById('legendQuality').innerHTML = legend
+    .map(([grade, text]) => `<div class="legend-row"><i class="q-dot q-${grade}"></i>${text}</div>`)
+    .join('') + (legendNote ? `<div class="legend-note">${legendNote}</div>` : '');
+}
+
+/** Draws the live network the picker names; rejects when the Homey can't read it. */
+function loadLive(network) {
+  setNetwork(network);
+  networkPick.disabled = true;
+  // Thread asks every Matter device for its diagnostics, which takes a few seconds.
+  if (network !== 'zigbee') toast(`Asking Homey for the ${NETWORKS[network].label} network…`);
+  return getJson(`api/graph?network=${network}`)
+    .then((graph) => {
+      if (state.network !== network) return; // the picker moved on meanwhile
+      state.probe = null;
+      graph.meta.source = 'Homey (live)';
+      historyActive = '';
+      show(graph);
+      compareShown();
+      if (network !== 'zigbee') toast(`${graph.meta.deviceCount - 1} ${NETWORKS[network].label} devices`, 'ok');
+    })
+    .finally(() => {
+      networkPick.disabled = false;
+    });
+}
+
+/** Draws a loaded network probe: the network on screen, if the probe has it, else the first it has. */
+function showProbe(graphs, sourceName) {
+  state.probe = { graphs, source: sourceName };
+  const network = graphs[state.network] ? state.network : Object.keys(NETWORKS).find((id) => graphs[id]);
+  if (!network) throw new Error('There is no network in that probe to draw.');
+  showProbeNetwork(network);
+}
+
+function showProbeNetwork(network) {
+  setNetwork(network);
+  const graph = state.probe.graphs[network];
+  if (!graph) {
+    toast(`That probe has no ${NETWORKS[network].label} network.`, 'warn');
+    return;
+  }
+  graph.meta.source = state.probe.source;
+  historyActive = 'import';
+  show(graph);
+  compareShown();
+}
+
+networkPick.addEventListener('change', () => {
+  const network = networkPick.value;
+  if (state.probe) {
+    showProbeNetwork(network);
+    return;
+  }
+  loadLive(network).catch((err) => toast(`Could not read the ${NETWORKS[network].label} network: ${err.message}`, 'warn'));
+});
+
+document.getElementById('backLive').addEventListener('click', () => {
+  state.probe = null;
+  loadLive(state.network).catch((err) => toast(`Could not read the live network: ${err.message}`, 'warn'));
+});
 
 // ------------------------------------------------------------- imports ----
 // Dumps loaded with Remember ticked are kept on the Homey, beside the snapshots,
@@ -270,11 +428,11 @@ function renderStats() {
   const items = [
     ['Devices', m.deviceCount],
     ['Routers', m.routerCount],
-    ['End devices', m.endDeviceCount],
-    ['Max hops', m.maxHops],
+    [state.network === 'zwave' ? 'Sleeping' : 'End devices', m.endDeviceCount],
+    ['Max hops', state.network === 'zwave' ? null : m.maxHops],
     ['Channel', c.channel],
     ['PAN', c.panId],
-  ];
+  ].filter(([, v]) => v != null && v !== '');
   if (m.weakLinkCount) items.push(['Weak links', `<span class="stat-warn">${m.weakLinkCount}</span>`]);
   if (m.ghostCount) items.push(['Stale', m.ghostCount]);
   const conflicts = sharedAddresses().length;
@@ -319,7 +477,7 @@ function pathLinkSet(node) {
 function matches(node) {
   if (!state.query) return false;
   const q = state.query.toLowerCase();
-  return [node.name, node.modelId, node.manufacturerName, node.ieeeAddr, String(node.nwkAddr), `0x${node.nwkAddr.toString(16)}`]
+  return [node.name, node.modelId, node.manufacturerName, node.ieeeAddr, String(node.nwkAddr), node.addrLabel]
     .some((v) => v && String(v).toLowerCase().includes(q));
 }
 
@@ -631,7 +789,7 @@ function showTooltip(event, d) {
   tooltip.html(`
     <div class="t-name">${escapeHtml(d.name)}</div>
     <div class="t-meta">${escapeHtml(d.modelId || 'unknown model')}<br>
-    0x${d.nwkAddr.toString(16)} · ${d.type}${d.hops != null ? ` · ${d.hops} hop${d.hops === 1 ? '' : 's'}` : ' · no route'}</div>
+    ${escapeHtml(d.addrLabel)} · ${d.type}${d.hops != null ? ` · ${d.hops} hop${d.hops === 1 ? '' : 's'}` : ' · no route'}</div>
   `).style('opacity', 1);
   moveTooltip(event);
 }
@@ -648,10 +806,7 @@ function showLinkTooltip(event, d) {
 }
 
 function qualityLine(l) {
-  if (l.grade === 'unknown') {
-    return `Link quality unknown · only ${l.sample || 0} transmissions`;
-  }
-  return `${GRADE_LABEL[l.grade]} link · ${Math.round(l.rate * 100)}% of ${l.sample.toLocaleString()} transmissions got through`;
+  return escapeHtml(l.summary || `${GRADE_LABEL[l.grade || 'unknown']} link`);
 }
 
 function moveTooltip(event) {
@@ -681,11 +836,13 @@ const PANEL_TABS = [['quality', 'Link quality'], ['traffic', 'Traffic'], ['chang
 
 /** With nothing selected, the panel shows a tab bar over the active tab. */
 function renderOverview() {
+  const { tabs } = NETWORKS[state.network];
+  if (!tabs.includes(state.panelTab)) state.panelTab = 'quality';
   if (state.panelTab === 'traffic') renderTrafficTab();
   else if (state.panelTab === 'changes') renderChangesTab();
   else renderQualityTab();
   document.getElementById('panel').insertAdjacentHTML('afterbegin', `
-    <div class="tabs">${PANEL_TABS.map(([id, label]) => `<button type="button"
+    <div class="tabs">${PANEL_TABS.filter(([id]) => tabs.includes(id)).map(([id, label]) => `<button type="button"
       class="tab${state.panelTab === id ? ' active' : ''}" data-tab="${id}">${label}${id === 'changes' && state.changes?.size
   ? ` (${state.changes.size})` : ''}</button>`).join('')}</div>`);
 }
@@ -697,7 +854,7 @@ function renderOverview() {
 function renderQualityTab() {
   const links = state.graph.links
     .filter((l) => l.kind === 'route' && l.grade !== 'unknown')
-    .sort((a, b) => a.rate - b.rate)
+    .sort((a, b) => (a.score ?? 2) - (b.score ?? 2))
     .slice(0, 12);
 
   const rows = links.map((l) => {
@@ -706,8 +863,8 @@ function renderQualityTab() {
     return `<li data-addr="${child.addr}">
       <span class="q-dot q-${l.grade}"></span>
       <span class="wl-name">${escapeHtml(shortName(child.name))}
-        <span class="wl-via">via ${escapeHtml(shortName(parent.name))} · ${(l.sample || 0).toLocaleString()} tx</span></span>
-      <span class="wl-rate q-text-${l.grade}">${Math.round(l.rate * 100)}%</span>
+        <span class="wl-via">via ${escapeHtml(shortName(parent.name))}${l.sample != null ? ` · ${l.sample.toLocaleString()} tx` : ''}</span></span>
+      <span class="wl-rate q-text-${l.grade}">${escapeHtml(l.label ?? '')}</span>
     </li>`;
   }).join('');
 
@@ -723,11 +880,7 @@ function renderQualityTab() {
     </div>
     <div class="badges">${summary}</div>
     ${section('Weakest links', `<ul class="weaklinks">${rows}</ul>`)}
-    ${section('How this is measured', `<p class="note">The dump carries no LQI or signal
-      strength. Each device does report how many of its transmissions succeeded, and because
-      every device has exactly one parent relay, that success rate describes its link to that
-      parent. A router's counters also include traffic it forwards to its own children, so
-      read a router's grade as "this branch is struggling" rather than one exact hop.</p>`)}`;
+    ${section('How this is measured', `<p class="note">${NETWORKS[state.network].measured}</p>`)}`;
 
   document.getElementById('panel').querySelectorAll('[data-addr]').forEach((el) => {
     el.addEventListener('click', () => select(Number(el.dataset.addr)));
@@ -805,6 +958,7 @@ function renderPanel(n) {
   if (n.isGhost) badges.push('<span class="badge warn">stale route entry</span>');
   if (!n.hasRoute && !n.isCoordinator && !n.isGhost) badges.push('<span class="badge danger">no route</span>');
   if (n.sharedWith) badges.push(`<span class="badge warn">address shared with ${escapeHtml(n.sharedWith.join(', '))}</span>`);
+  if (n.note) badges.push('<span class="badge warn">see note</span>');
 
   sections.push(`
     <div class="p-head">
@@ -816,6 +970,7 @@ function renderPanel(n) {
   // --- a stale entry and the device it most likely belongs to
   const notice = staleNotice(n);
   if (notice) sections.push(notice);
+  if (n.note) sections.push(`<p class="notice">${escapeHtml(n.note)}</p>`);
 
   // --- route back to the controller
   sections.push(routeSection(n));
@@ -829,13 +984,20 @@ function renderPanel(n) {
   sections.push('<div id="routeHistory"></div>');
 
   // --- identity
-  const rows = [
-    ['Network addr', `<span class="mono">0x${n.nwkAddr.toString(16).padStart(4, '0')} (${n.nwkAddr})</span>`],
+  const zigbee = state.network === 'zigbee';
+  const rows = zigbee ? [
+    ['Network addr', `<span class="mono">${escapeHtml(n.addrLabel)} (${n.nwkAddr})</span>`],
     ['IEEE addr', n.ieeeAddr ? `<span class="mono">${n.ieeeAddr}</span>` : '—'],
     ['Device type', n.isCoordinator ? 'coordinator' : n.type],
     ['Firmware', n.swBuildId || '—'],
     ['Homey app', n.ownerUri ? `<span class="mono">${escapeHtml(n.ownerUri.replace('homey:app:', ''))}</span>` : '—'],
     ['Last seen', n.lastSeen ? `${new Date(n.lastSeen).toLocaleString()}<br><span class="mono">${ago(n.lastSeen)}</span>` : '—'],
+  ] : [
+    ['Address', `<span class="mono">${escapeHtml(n.addrLabel)}</span>`],
+    ...(n.ieeeAddr ? [['Extended addr', `<span class="mono">${escapeHtml(n.ieeeAddr)}</span>`]] : []),
+    ['Device type', n.isCoordinator ? 'coordinator' : n.type],
+    // The facts repeat the product and firmware, so the header's subtitle is enough there.
+    ...(n.facts || []).map((f) => [escapeHtml(f.label), escapeHtml(f.value)]),
   ];
   sections.push(section('Device', `<dl class="kv">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>`));
 
@@ -902,30 +1064,29 @@ function uplinkSection(n) {
     && (l.target.addr ?? l.target) === n.addr);
   if (!link) return '';
   const parent = state.byAddr.get(n.parent);
-  const pct = link.rate == null ? null : Math.round(link.rate * 100);
+  const pct = link.score == null ? null : Math.round(link.score * 100);
+  const counted = link.sample != null;
 
   return section('Link to parent', `
     <div class="qhead">
       <span class="q-dot q-${link.grade}"></span>
       <span class="q-text-${link.grade}">${GRADE_LABEL[link.grade]}</span>
-      ${pct == null ? '' : `<span class="qpct">${pct}%</span>`}
+      ${link.label && link.label !== '—' ? `<span class="qpct">${escapeHtml(link.label)}</span>` : ''}
     </div>
     <div class="bar q-bar-${link.grade}"><span style="width:${pct ?? 0}%"></span></div>
     <dl class="kv">
       <dt>Parent</dt><dd class="linkish" data-addr="${parent.addr}">${escapeHtml(parent.name)}</dd>
-      <dt>Transmissions</dt><dd>${(link.sample || 0).toLocaleString()}</dd>
-      <dt>Failed</dt><dd>${(link.txError || 0).toLocaleString()}</dd>
+      ${counted ? `<dt>Transmissions</dt><dd>${link.sample.toLocaleString()}</dd>
+      <dt>Failed</dt><dd>${(link.txError || 0).toLocaleString()}</dd>` : ''}
     </dl>
-    ${link.grade === 'unknown'
-    ? '<p class="note">Too few transmissions to judge this link yet.</p>'
-    : ''}`);
+    <p class="note">${qualityLine(link)}</p>`);
 }
 
 /** How well the devices hanging off this one are doing. */
 function downlinkSection(n) {
   const links = state.graph.links
     .filter((l) => l.kind === 'route' && (l.source.addr ?? l.source) === n.addr)
-    .sort((a, b) => (a.rate ?? 2) - (b.rate ?? 2));
+    .sort((a, b) => (a.score ?? 2) - (b.score ?? 2));
   if (!links.length) return '';
 
   const rows = links.map((l) => {
@@ -933,7 +1094,7 @@ function downlinkSection(n) {
     return `<li data-addr="${child.addr}">
       <span class="q-dot q-${l.grade}"></span>
       <span class="wl-name">${escapeHtml(shortName(child.name))}</span>
-      <span class="wl-rate q-text-${l.grade}">${l.rate == null ? '—' : `${Math.round(l.rate * 100)}%`}</span>
+      <span class="wl-rate q-text-${l.grade}">${escapeHtml(l.label ?? '—')}</span>
     </li>`;
   }).join('');
   return section(`Links to children (${links.length})`, `<ul class="weaklinks">${rows}</ul>`);
@@ -973,6 +1134,11 @@ function staleNotice(n) {
 }
 
 function routeSection(n) {
+  if (n.isCoordinator && state.network !== 'zigbee') {
+    const facts = state.graph.controller.facts || [];
+    return section('Homey', `<dl class="kv">${facts.map((f) => `<dt>${escapeHtml(f.label)}</dt>
+      <dd class="mono">${escapeHtml(f.value)}</dd>`).join('')}</dl>`);
+  }
   if (n.isCoordinator) {
     const c = state.graph.controller;
     return section('Controller', `
@@ -985,20 +1151,24 @@ function routeSection(n) {
       </dl>`);
   }
   if (!n.path) {
-    return section('Path to controller', `<p style="font-size:12px;color:var(--text-dim);margin:0">
-      No route in the controller's routing table — the device is unreachable or has not been contacted since the last restart.</p>`);
+    const why = state.network === 'zigbee'
+      ? 'No route in the controller\'s routing table — the device is unreachable or has not been contacted since the last restart.'
+      : 'No device reported a link to it, so its place in the mesh isn\'t known.';
+    return section('Path to controller', `<p style="font-size:12px;color:var(--text-dim);margin:0">${why}</p>`);
   }
   const items = n.path.map((addr, i) => {
     const hop = state.byAddr.get(addr);
     const color = hop ? hopColor(hop) : GHOST_COLOR;
     const label = i === 0 ? 'C' : i;
     const grade = i === 0 ? null : hop?.uplinkGrade || 'unknown';
-    const rate = i === 0 || hop?.uplinkRate == null ? '' : `${Math.round(hop.uplinkRate * 100)}%`;
+    const into = i === 0 ? null : state.graph.links.find((l) => l.kind === 'route'
+      && (l.source.addr ?? l.source) === n.path[i - 1] && (l.target.addr ?? l.target) === addr);
+    const rate = into?.label && into.label !== '—' ? into.label : '';
     return `<li>
       <span class="step" style="background:${color}">${label}</span>
       <span class="rname" data-addr="${addr}">${escapeHtml(hop ? shortName(hop.name) : `0x${addr.toString(16)}`)}</span>
-      ${grade ? `<span class="wl-rate q-text-${grade}" title="quality of the hop into this device">${rate}</span>` : ''}
-      <span class="raddr">0x${addr.toString(16)}</span>
+      ${grade ? `<span class="wl-rate q-text-${grade}" title="quality of the hop into this device">${escapeHtml(rate)}</span>` : ''}
+      <span class="raddr">${escapeHtml(hop ? hop.addrLabel : `0x${addr.toString(16)}`)}</span>
     </li>`;
   });
   return section(`Path to controller (${n.hops} hop${n.hops === 1 ? '' : 's'})`, `<ul class="route">${items.join('')}</ul>`);
@@ -1229,16 +1399,21 @@ window.addEventListener('drop', (e) => {
 
 // ----------------------------------------------------------------- boot ----
 
+let startNetwork = 'zigbee';
 try {
   rememberBox.checked = localStorage.getItem(REMEMBER_KEY) !== 'no';
+  startNetwork = localStorage.getItem(NETWORK_KEY) || 'zigbee';
 } catch { /* ignore */ }
-// Served by the Homey app: load the live network straight away. The newest kept
-// import and the loader are the fallback for when the Zigbee state can't be read.
-getJson('api/graph')
-  .then((graph) => {
-    graph.meta.source = 'Homey (live)';
-    show(graph);
-    compareShown();
+// Served by the Homey app: load the live network straight away, the one picked
+// last time. The newest kept import and the loader are the fallback for when
+// the Zigbee state can't be read.
+loadLive(NETWORKS[startNetwork] ? startNetwork : 'zigbee')
+  .catch(() => {
+    if (state.network !== 'zigbee') {
+      toast(`Could not read the ${NETWORKS[state.network].label} network.`, 'warn');
+      return loadLive('zigbee');
+    }
+    return Promise.reject();
   })
   .catch(() => restore().then((shown) => {
     if (!shown) openLoader(true);
@@ -1249,14 +1424,11 @@ getJson('api/graph')
 // The history pane: ● is the live state, then every snapshot, newest first,
 // labelled by how many hours back it is, in steps of the snapshot interval.
 const historyList = document.getElementById('historyList');
-let historyActive = ''; // '' is live, otherwise the id of the snapshot on screen
-
-let historySnapshots = null; // every snapshot, oldest first, as last reported by the app
-
-let historySettings = null; // the snapshot settings, as last reported by the app
 
 /** Draws an imported dump. It is not part of the history, so there is nothing to compare it with. */
 function showImport(graph, id) {
+  state.probe = null;
+  setNetwork('zigbee');
   historyActive = id || 'import';
   show(graph);
   compareShown();
@@ -1314,8 +1486,9 @@ historyList.addEventListener('click', (e) => {
   const item = e.target.closest('[data-snap]');
   if (!item) return;
   const id = item.dataset.snap;
-  getJson(id ? `api/snapshots/${id}` : 'api/graph')
+  getJson(id ? `api/snapshots/${id}` : 'api/graph?network=zigbee')
     .then((graph) => {
+      state.probe = null;
       historyActive = id;
       graph.meta.source = id ? `Snapshot ${item.dataset.when} (${item.textContent} h)` : 'Homey (live)';
       // Only while this one snapshot is drawn, so Fit, resizing and the rest still refit.
@@ -1438,6 +1611,8 @@ function compareShown() {
   state.changes = null;
   applyHighlight();
   if (!state.selected) renderOverview();
+  // Snapshots are of the Zigbee network only.
+  if (state.network !== 'zigbee') return;
   const olderId = olderThan(historyActive);
   if (!olderId) return;
 
@@ -1492,7 +1667,7 @@ const FLAP_THRESHOLD = 3;
 function loadRouteHistory(n) {
   const box = document.getElementById('routeHistory');
   if (!box) return;
-  if (!n.ieeeAddr || n.isCoordinator || n.isGhost) {
+  if (state.network !== 'zigbee' || !n.ieeeAddr || n.isCoordinator || n.isGhost) {
     box.remove();
     return;
   }

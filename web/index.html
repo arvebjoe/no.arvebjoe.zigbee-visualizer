@@ -27,11 +27,17 @@
 </head>
 <body>
 <header class="topbar">
+  <select id="network" class="network-pick" title="Which network to draw" aria-label="Network">
+    <option value="zigbee">Zigbee</option>
+    <option value="thread">Thread &amp; Matter</option>
+    <option value="zwave">Z-Wave</option>
+  </select>
   <div class="brand">
     <span class="dot"></span>
     <h1>Homey Network Visualizer</h1>
     <button id="open" title="Load another dump">Load…</button>
     <span id="source" class="source"></span>
+    <button id="backLive" type="button" title="Draw the live network from this Homey again" hidden>Back to live</button>
   </div>
   <div id="netstats" class="netstats"></div>
   <div class="controls">
@@ -60,12 +66,8 @@
         <div class="legend-row"><i class="swatch h4"></i>4+ hops</div>
         <div class="legend-sep"></div>
         <div class="legend-title">Link quality</div>
-        <div class="legend-row"><i class="q-dot q-good"></i>Good — 95%+ TX success</div>
-        <div class="legend-row"><i class="q-dot q-fair"></i>Fair — 85–95%</div>
-        <div class="legend-row"><i class="q-dot q-weak"></i>Weak — 70–85%</div>
-        <div class="legend-row"><i class="q-dot q-bad"></i>Bad — under 70%</div>
-        <div class="legend-row"><i class="q-dot q-unknown"></i>Too little traffic to judge</div>
-        <div class="legend-note">Line thickness = traffic volume</div>
+        <!-- Filled in by app.js: each network grades its hops its own way. -->
+        <div id="legendQuality"></div>
         <div class="legend-sep"></div>
         <div class="legend-row"><i class="shape square"></i>Router</div>
         <div class="legend-row"><i class="shape circle"></i>End device</div>
@@ -105,6 +107,7 @@
         </div>
       </div>
     </div>
+    <div id="mapNotice" class="map-notice" hidden></div>
     <div id="hint" class="hint">Click a node to inspect it and trace its path back to the controller. Hover a link for its quality.</div>
   </div>
 
@@ -121,11 +124,12 @@
 <div id="loader" class="loader" hidden>
   <div class="loader-card">
     <button id="loaderClose" class="loader-close" type="button" title="Close (Esc)" hidden>&times;</button>
-    <h2>Load a Zigbee dump</h2>
+    <h2>Load a dump</h2>
     <p class="loader-sub">
-      A dump you load here goes to your Homey and nowhere else: the Homey strips
-      its network key and reads it, and this page draws it. With Remember ticked,
-      the Homey keeps it beside the snapshots, without the key.
+      A Zigbee dump, or a raw dump of every network (below). What you load here
+      goes to your Homey and nowhere else: the Homey strips its network key and
+      reads it, and this page draws it. With Remember ticked, the Homey keeps a
+      Zigbee dump beside the snapshots, without the key.
     </p>
 
     <div id="dropzone" class="dropzone">
@@ -150,7 +154,7 @@
     <p id="loaderMsg" class="loader-msg" hidden></p>
 
     <p class="probe">
-      Helping add Z-Wave, Thread or Matter?
+      Something looks wrong on the Thread, Matter or Z-Wave map?
       <a href="api/probe">Download a raw dump of every network</a> on this Homey
       and share it. It takes a moment; network keys and other secrets are left out.
     </p>

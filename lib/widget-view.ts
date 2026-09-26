@@ -1,6 +1,8 @@
 'use strict';
 
-import type { Grade, Graph, GraphNode } from './zigbee-graph';
+import type {
+  Grade, Graph, GraphNode, NetworkId,
+} from './graph';
 
 /**
  * The dashboard widget's view of the network: the graph from buildGraph(),
@@ -32,6 +34,8 @@ export type WidgetNode = {
   grade: Grade;
   /** That hop's TX success rate, 0–1. */
   rate: number | null;
+  /** That hop's quality in a few characters, e.g. "97%" or "−71 dBm". */
+  label: string | null;
   /** The route from the controller (addr 0) to this device, inclusive. */
   path: number[] | null;
   x: number;
@@ -47,6 +51,7 @@ export type WidgetLink = {
 };
 
 export type WidgetView = {
+  network: NetworkId;
   generatedAt: number;
   error: string | null;
   channel: number | null;
@@ -141,7 +146,11 @@ export function buildWidgetView(graph: Graph, options: { ghosts: boolean }): Wid
     return n.type === 'router' ? 'router' : 'device';
   };
 
+  // The label of the hop into each device, by the device's address.
+  const labels = new Map(routeLinks.map((l) => [l.target, l.label ?? null]));
+
   return {
+    network: graph.network,
     generatedAt: graph.meta.generatedAt,
     error: graph.meta.error ?? null,
     channel: graph.controller.channel ?? null,
@@ -159,6 +168,7 @@ export function buildWidgetView(graph: Graph, options: { ghosts: boolean }): Wid
           relays: n.descendantCount,
           grade: n.uplinkGrade,
           rate: n.uplinkRate,
+          label: labels.get(n.addr) ?? null,
           path: n.path,
           x: at.x,
           y: at.y,

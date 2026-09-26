@@ -14,24 +14,16 @@
  * whole tree by walking each route and connecting consecutive hops.
  */
 
+import {
+  blankNode, describeRate, finishGraph, gradeFor, Graph, GraphLink, GraphNode,
+} from './graph';
+
+export type {
+  Grade, Graph, GraphLink, GraphNode,
+} from './graph';
+export { gradeFor } from './graph';
+
 const COORDINATOR_ADDR = 0;
-
-/**
- * Link quality grades, derived from the TX success counters. The state carries
- * no LQI/RSSI, so this is a proxy: a device that has to retry a lot to get its
- * frames through is a device with a poor link to its parent.
- */
-const GRADES = [
-  { grade: 'good', min: 0.95 },
-  { grade: 'fair', min: 0.85 },
-  { grade: 'weak', min: 0.70 },
-  { grade: 'bad', min: 0 },
-] as const;
-
-// Below this many transmissions the success rate is too noisy to judge.
-const MIN_SAMPLE = 30;
-
-export type Grade = 'good' | 'fair' | 'weak' | 'bad' | 'unknown';
 
 /** One entry of `nodes`, as far as we read it. */
 export type RawZigbeeNode = {
@@ -81,116 +73,23 @@ export type ZigbeeState = {
   nodes?: Record<string, RawZigbeeNode>;
 };
 
-export type GraphNode = {
-  /** The node's id in the graph: its network address, unless another device has that too. */
-  addr: number;
-  /** The network address the device reports. */
-  nwkAddr: number;
-  /** The devices that report the same network address, if any. */
-  sharedWith?: string[];
-  /** The network address the device had when Homey interviewed it, if it says. */
-  pairedAddr?: number;
-  /** On a stale route entry: the graph ids of the devices that most likely left it behind. */
-  probablyWas?: number[];
-  /** On a device: the stale route entry it most likely left behind, by its address. */
-  staleAddr?: number;
-  ieeeAddr: string | null;
-  name: string;
-  type: string;
-  modelId?: string;
-  manufacturerName?: string;
-  swBuildId?: string;
-  ownerUri?: string;
-  receiveWhenIdle?: boolean;
-  lastSeen?: number;
-  stats: {
-    tx: number;
-    txSuccess: number;
-    txError: number;
-    rx: number;
-    successRate: number | null;
-  };
-  capabilities: Record<string, boolean> | null;
-  endpoints: Array<{
-    endpointId?: number;
-    profileId?: number;
-    deviceId?: number;
-    inputClusters: number[];
-    outputClusters: number[];
-  }>;
-  bindings: Record<string, Array<string | number>> | null;
-  isGhost: boolean;
-  isCoordinator: boolean;
-  hasRoute: boolean;
-  hops: number | null;
-  path: number[] | null;
-  parent?: number;
-  childCount: number;
-  descendantCount: number;
-  uplinkGrade: Grade;
-  uplinkRate: number | null;
-};
-
-export type GraphLink = {
-  id: string;
-  source: number;
-  target: number;
-  kind: 'route' | 'binding';
-  clusters?: Array<string | number>;
-  rate?: number | null;
-  sample?: number;
-  txError?: number;
-  grade?: Grade;
-};
-
-export type Graph = {
-  controller: {
-    channel?: number;
-    panId?: string;
-    extendedPanId?: string;
-    ieeeAddress?: string;
-    softwareVersion?: string;
-    currentCommand?: string;
-  };
-  meta: {
-    ready?: boolean;
-    error?: string | null;
-    nodeCount: number;
-    deviceCount: number;
-    routerCount: number;
-    endDeviceCount: number;
-    ghostCount: number;
-    unreachableCount: number;
-    bindingCount: number;
-    maxHops: number;
-    weakLinkCount: number;
-    generatedAt: number;
-  };
-  nodes: GraphNode[];
-  links: GraphLink[];
-};
-
-export function gradeFor(rate: number | null, sample: number): Grade {
-  if (rate == null || sample < MIN_SAMPLE) return 'unknown';
-  return (GRADES.find((g) => rate >= g.min) ?? GRADES[GRADES.length - 1]).grade;
-}
-
 /** The network address a device had when Homey interviewed it, if it says. */
 function interviewAddr(node: RawZigbeeNode): number | undefined {
   return node.endpointDescriptors?.find((ep) => ep.nwkAddrOfInterest != null)?.nwkAddrOfInterest;
 }
+
+/** A Zigbee network address as it is usually written: 0x1a2b. */
+const hex = (addr: number) => `0x${addr.toString(16).padStart(4, '0')}`;
 
 function buildNode(addr: number, ieee: string, node: RawZigbeeNode): GraphNode {
   const stats = node.stats ?? {};
   const tx = stats.tx ?? 0;
   const txSuccess = stats.txSuccess ?? 0;
   return {
-    addr,
-    nwkAddr: addr,
+    ...blankNode(addr, node.name || node.modelId || `0x${addr.toString(16)}`, node.type || node.deviceType || 'unknown'),
+    addrLabel: hex(addr),
     pairedAddr: interviewAddr(node),
     ieeeAddr: ieee,
-    name: node.name || node.modelId || `0x${addr.toString(16)}`,
-    type: node.type || node.deviceType || 'unknown',
     modelId: node.modelId,
     manufacturerName: node.manufacturerName,
     swBuildId: node.swBuildId,
@@ -213,41 +112,15 @@ function buildNode(addr: number, ieee: string, node: RawZigbeeNode): GraphNode {
       outputClusters: ep.outputClusters ?? [],
     })),
     bindings: node.bindings ?? null,
-    isGhost: false,
-    isCoordinator: false,
-    hasRoute: false,
-    hops: null,
-    path: null,
-    childCount: 0,
-    descendantCount: 0,
-    uplinkGrade: 'unknown',
-    uplinkRate: null,
   };
 }
 
 /** A routing-table entry whose device is no longer in the node list. */
 function ghostNode(addr: number): GraphNode {
   return {
-    addr,
-    nwkAddr: addr,
-    ieeeAddr: null,
-    name: `Unknown 0x${addr.toString(16)}`,
-    type: 'ghost',
-    stats: {
-      tx: 0, txSuccess: 0, txError: 0, rx: 0, successRate: null,
-    },
-    capabilities: null,
-    endpoints: [],
-    bindings: null,
+    ...blankNode(addr, `Unknown 0x${addr.toString(16)}`, 'ghost'),
+    addrLabel: hex(addr),
     isGhost: true,
-    isCoordinator: false,
-    hasRoute: false,
-    hops: null,
-    path: null,
-    childCount: 0,
-    descendantCount: 0,
-    uplinkGrade: 'unknown',
-    uplinkRate: null,
   };
 }
 
@@ -320,72 +193,30 @@ export function buildGraph(state: ZigbeeState): Graph {
     node.hasRoute = true;
   });
 
-  // ---- links ------------------------------------------------------------
-  const links = new Map<string, GraphLink>();
-  const addLink = (source: number, target: number, kind: GraphLink['kind']) => {
-    const id = `${source}->${target}:${kind}`;
-    if (!links.has(id)) {
-      links.set(id, {
-        id, source, target, kind,
-      });
-    }
-    return links.get(id) as GraphLink;
-  };
-
-  byAddr.forEach((node) => {
-    if (!node.path || node.path.length < 2) return;
-    for (let i = 0; i < node.path.length - 1; i += 1) {
-      addLink(node.path[i], node.path[i + 1], 'route');
-    }
-    node.parent = node.path[node.path.length - 2];
-  });
-
   // Bindings are logical (cluster-level) relations, not routing. They are kept
   // as a separate layer the UI can toggle on.
+  const bindings = new Map<string, GraphLink>();
   byAddr.forEach((node) => {
     Object.entries(node.bindings ?? {}).forEach(([targetIeee, clusters]) => {
       const target = [...byAddr.values()].find((n) => n.ieeeAddr === targetIeee);
       if (!target || target.addr === node.addr) return;
-      addLink(node.addr, target.addr, 'binding').clusters = clusters;
+      const id = `${node.addr}->${target.addr}:binding`;
+      bindings.set(id, {
+        id, source: node.addr, target: target.addr, kind: 'binding', clusters,
+      });
     });
   });
 
-  // ---- link quality -----------------------------------------------------
-  // Every route link a->b is b's uplink (b.parent === a, because the route
-  // lists are prefix-consistent), so b's TX counters describe that hop.
-  links.forEach((link) => {
-    if (link.kind !== 'route') return;
-    const child = byAddr.get(link.target);
-    if (!child) return;
+  // Each hop is graded by the TX counters of the device at its far end.
+  const gradeLink = (link: GraphLink, child: GraphNode) => {
     const { successRate, tx, txError } = child.stats;
-    link.rate = successRate;
-    link.sample = tx;
-    link.txError = txError;
-    link.grade = gradeFor(successRate, tx);
-    child.uplinkGrade = link.grade;
-    child.uplinkRate = successRate;
-  });
-
-  // ---- derived stats ----------------------------------------------------
-  const childCount = new Map<number, number>();
-  byAddr.forEach((node) => {
-    if (node.parent === undefined) return;
-    childCount.set(node.parent, (childCount.get(node.parent) ?? 0) + 1);
-  });
-  byAddr.forEach((node) => {
-    node.childCount = childCount.get(node.addr) ?? 0;
-  });
-  byAddr.forEach((node) => {
-    (node.path ?? []).slice(0, -1).forEach((hop) => {
-      const relay = byAddr.get(hop);
-      if (relay) relay.descendantCount += 1;
+    const grade = gradeFor(successRate, tx);
+    Object.assign(link, {
+      rate: successRate, sample: tx, txError, grade, score: successRate, ...describeRate(successRate, tx, grade),
     });
-  });
+  };
 
-  const nodes = [...byAddr.values()].sort((a, b) => (a.hops ?? 99) - (b.hops ?? 99));
-  const linkList = [...links.values()];
-
-  return {
+  return finishGraph('zigbee', byAddr, gradeLink, {
     controller: {
       channel: controller.channel,
       panId: controller.panId,
@@ -394,21 +225,7 @@ export function buildGraph(state: ZigbeeState): Graph {
       softwareVersion: controller.softwareVersion,
       currentCommand: controller.currentCommand,
     },
-    meta: {
-      ready: state.zigbee_ready,
-      error: state.zigbee_error,
-      nodeCount: nodes.length,
-      deviceCount: nodes.filter((n) => !n.isGhost).length,
-      routerCount: nodes.filter((n) => n.type === 'router').length,
-      endDeviceCount: nodes.filter((n) => n.type === 'enddevice').length,
-      ghostCount: nodes.filter((n) => n.isGhost).length,
-      unreachableCount: nodes.filter((n) => !n.hasRoute && !n.isCoordinator).length,
-      bindingCount: linkList.filter((l) => l.kind === 'binding').length,
-      maxHops: nodes.reduce((max, n) => Math.max(max, n.hops ?? 0), 0),
-      weakLinkCount: linkList.filter((l) => l.grade === 'weak' || l.grade === 'bad').length,
-      generatedAt: Date.now(),
-    },
-    nodes,
-    links: linkList,
-  };
+    meta: { ready: state.zigbee_ready, error: state.zigbee_error },
+    links: [...bindings.values()],
+  });
 }

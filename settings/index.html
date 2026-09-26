@@ -130,6 +130,21 @@
 
       /* -------------------------------------------------------- toolbar -- */
       .toolbar { display: flex; flex-direction: column; gap: 10px; margin: 14px 0 12px; }
+      /* The network picker comes first: everything below is about the network it names. */
+      .network-pick {
+        width: 100%;
+        margin: 0;
+        font-size: 17px;
+        font-weight: 600;
+        color: var(--text);
+        background: var(--surface);
+        border: 1px solid var(--accent);
+        border-radius: 12px;
+        padding: 11px 14px;
+        cursor: pointer;
+      }
+      .network-pick:disabled { opacity: .6; }
+      .map-notice { color: var(--warn); font-size: 15px; line-height: 1.5; margin: 0; }
       .chips-row { display: flex; flex-wrap: wrap; gap: 8px; }
       .pill {
         /* Grow to share out the row, but never shrink below the label —
@@ -407,6 +422,11 @@
 
   <body>
     <div class="toolbar">
+      <select class="network-pick" id="network" aria-label="Network">
+        <option value="zigbee">Zigbee</option>
+        <option value="thread">Thread &amp; Matter</option>
+        <option value="zwave">Z-Wave</option>
+      </select>
       <div class="chips-row">
         <button class="pill" id="fit" type="button">Fit</button>
         <button class="pill" id="expand" type="button" aria-pressed="false">Fullscreen</button>
@@ -417,6 +437,7 @@
         <button class="pill" id="open-browser" type="button" hidden>Browser</button>
       </div>
       <div class="status" id="status"></div>
+      <p class="map-notice" id="notice" hidden></p>
     </div>
 
     <div class="graph-wrap" id="graph-wrap">
@@ -446,7 +467,7 @@
     </section>
 
     <details class="raw">
-      <summary>Raw controller data</summary>
+      <summary>Raw Zigbee controller data</summary>
       <textarea id="raw" readonly spellcheck="false"></textarea>
     </details>
 
@@ -457,8 +478,32 @@
       var SVG_NS = 'http://www.w3.org/2000/svg';
 
       var GRADE_LABEL = {
-        good: 'Good', fair: 'Fair', weak: 'Weak', bad: 'Bad', unknown: 'Too little traffic',
+        good: 'Good', fair: 'Fair', weak: 'Weak', bad: 'Bad', unknown: 'Unknown',
       };
+
+      // How each network's hops are measured, for the Link quality overview.
+      // The Homey grades every hop and gives each link its own label and
+      // sentence, so the page never needs to know how.
+      var MEASURED = {
+        zigbee: 'Homey reports no LQI or signal strength. Each device does report how many of its '
+          + 'transmissions succeeded, and because every device has exactly one parent relay, that '
+          + 'success rate describes its link to that parent. A router\'s counters also include '
+          + 'traffic it forwards to its own children, so read a router\'s grade as &ldquo;this '
+          + 'branch is struggling&rdquo; rather than one exact hop. The counters are cumulative '
+          + 'since the controller last started.',
+        thread: 'Thread devices that support Matter\'s network diagnostics report every router they '
+          + 'hear, with the link quality both ways (0 to 3) and the signal strength. Thread routes '
+          + 'along the cheapest path, where a better link costs less, so each device\'s route here is '
+          + 'the cheapest path to Homey through the links they report. Routers that aren\'t Matter '
+          + 'devices of this Homey, and sleepy devices that don\'t answer, report nothing of their '
+          + 'own. Matter devices on Wi-Fi or Ethernet aren\'t part of the mesh and are drawn '
+          + 'straight from Homey, graded by Wi-Fi signal.',
+        zwave: 'Homey counts how many of its transmissions to each device got through, and that '
+          + 'success rate is the grade. Homey doesn\'t let apps read the Z-Wave routes, so the grade '
+          + 'is for the whole way to the device, over however many repeaters it takes.',
+      };
+
+      var NETWORK_KEY = 'network-visualizer.network';
       var GRADE_ORDER = ['bad', 'weak', 'fair', 'good', 'unknown'];
 
       // Cluster ids we are likely to meet in a Homey network, for readable endpoints.
@@ -479,6 +524,7 @@
 
       var state = {
         homey: null,
+        network: 'zigbee',
         graph: null,
         byAddr: {},
         selected: null,
@@ -522,8 +568,13 @@
       // ------------------------------------------------------------- data --
 
       function load() {
-        setStatus('Loading…');
-        state.homey.api('GET', '/network', null, function (err, graph) {
+        var network = state.network;
+        var pick = document.getElementById('network');
+        setStatus(network === 'thread' ? 'Asking every Matter device about its links…' : 'Loading…');
+        pick.disabled = true;
+        state.homey.api('GET', '/network?network=' + network, null, function (err, graph) {
+          pick.disabled = false;
+          if (network !== state.network) return; // the picker moved on meanwhile
           if (err) {
             setStatus('');
             document.getElementById('panel').innerHTML =
@@ -536,6 +587,9 @@
           graph.nodes.forEach(function (n) { state.byAddr[n.addr] = n; });
 
           document.getElementById('bindings').hidden = !graph.meta.bindingCount;
+          var notice = document.getElementById('notice');
+          notice.textContent = graph.meta.notice || '';
+          notice.hidden = !graph.meta.notice;
           setStatus(graph.meta.error
             ? 'Controller reports: ' + graph.meta.error
             : 'Updated ' + new Date(graph.meta.generatedAt).toLocaleTimeString());
@@ -1053,7 +1107,7 @@
       function renderOverview() {
         var links = state.graph.links
           .filter(function (l) { return l.kind === 'route' && l.grade !== 'unknown'; })
-          .sort(function (a, b) { return a.rate - b.rate; })
+          .sort(function (a, b) { return score(a) - score(b); })
           .slice(0, 12);
 
         var rows = links.map(function (l) {
@@ -1063,10 +1117,10 @@
           return '<li data-addr="' + child.addr + '">'
             + '<span class="q-dot q-' + l.grade + '"></span>'
             + '<span class="wl-name">' + escapeHtml(shortName(child.name))
-            + '<span class="wl-via">via ' + escapeHtml(shortName(parent.name)) + ' · '
-            + (l.sample || 0).toLocaleString() + ' tx</span></span>'
+            + '<span class="wl-via">via ' + escapeHtml(shortName(parent.name))
+            + (l.sample != null ? ' · ' + l.sample.toLocaleString() + ' tx' : '') + '</span></span>'
             + '<span class="wl-rate q-text-' + l.grade + '">'
-            + Math.round(l.rate * 100) + '%</span></li>';
+            + escapeHtml(l.label || '') + '</span></li>';
         }).join('');
 
         var counts = countGrades();
@@ -1083,14 +1137,13 @@
           + '<div class="sub">Every hop, ranked worst first. Tap one to trace it.</div></div>'
           + '<div class="badges">' + summary + '</div>'
           + section('Weakest links', '<ul class="linklist">' + rows + '</ul>')
-          + section('How this is measured', '<p class="note">Homey reports no LQI or signal '
-            + 'strength. Each device does report how many of its transmissions succeeded, and '
-            + 'because every device has exactly one parent relay, that success rate describes '
-            + 'its link to that parent. A router\'s counters also include traffic it forwards to '
-            + 'its own children, so read a router\'s grade as &ldquo;this branch is struggling&rdquo; '
-            + 'rather than one exact hop. The counters are cumulative since the controller last '
-            + 'started.</p>');
+          + section('How this is measured', '<p class="note">' + MEASURED[state.network] + '</p>');
         wire(panel);
+      }
+
+      /** A link's score for sorting, worst first; a link without one goes last. */
+      function score(l) {
+        return l.score == null ? 2 : l.score;
       }
 
       function countGrades() {
@@ -1118,14 +1171,15 @@
         sections.push('<div class="p-head"><h2>' + escapeHtml(n.name) + '</h2><div class="sub">'
           + escapeHtml([n.manufacturerName, n.modelId].filter(Boolean).join(' · ') || 'Unknown device')
           + '</div></div><div class="badges">' + badges.join('') + '</div>');
+        if (n.note) sections.push('<p class="note map-notice">' + escapeHtml(n.note) + '</p><br>');
 
         sections.push(routeSection(n));
         sections.push(uplinkSection(n));
         var downlinks = downlinkSection(n);
         if (downlinks) sections.push(downlinks);
 
-        var rows = [
-          ['Network addr', '<span class="mono">0x' + n.nwkAddr.toString(16).padStart(4, '0') + ' (' + n.nwkAddr + ')</span>'],
+        var rows = state.network === 'zigbee' ? [
+          ['Network addr', '<span class="mono">' + escapeHtml(n.addrLabel) + ' (' + n.nwkAddr + ')</span>'],
           ['IEEE addr', n.ieeeAddr ? '<span class="mono">' + escapeHtml(n.ieeeAddr) + '</span>' : '—'],
           ['Device type', n.isCoordinator ? 'controller' : escapeHtml(n.type)],
           ['Firmware', escapeHtml(n.swBuildId || '—')],
@@ -1133,7 +1187,11 @@
           ['Last seen', n.lastSeen
             ? new Date(n.lastSeen).toLocaleString() + '<br><span class="mono">' + ago(n.lastSeen) + '</span>'
             : '—'],
-        ];
+        ] : [
+          ['Address', '<span class="mono">' + escapeHtml(n.addrLabel) + '</span>'],
+          ['Device type', n.isCoordinator ? 'controller' : escapeHtml(n.type)],
+        ].concat(n.ieeeAddr ? [['Extended addr', '<span class="mono">' + escapeHtml(n.ieeeAddr) + '</span>']] : [])
+          .concat((n.facts || []).map(function (f) { return [escapeHtml(f.label), escapeHtml(f.value)]; }));
         sections.push(section('Device', '<dl class="kv">' + rows.map(function (r) {
           return '<dt>' + r[0] + '</dt><dd>' + r[1] + '</dd>';
         }).join('') + '</dl>'));
@@ -1198,27 +1256,29 @@
         if (!link) return '';
         var parent = state.byAddr[n.parent];
         if (!parent) return '';
-        var pct = link.rate == null ? null : Math.round(link.rate * 100);
+        var pct = link.score == null ? null : Math.round(link.score * 100);
+        var label = link.label && link.label !== '—' ? link.label : '';
 
         return section('Link to parent',
           '<div class="qhead"><span class="q-dot q-' + link.grade + '"></span>'
           + '<span class="q-text-' + link.grade + '">' + GRADE_LABEL[link.grade] + '</span>'
-          + (pct == null ? '' : '<span class="qpct">' + pct + '%</span>') + '</div>'
+          + (label ? '<span class="qpct">' + escapeHtml(label) + '</span>' : '') + '</div>'
           + '<div class="bar q-bar-' + link.grade + '"><span style="width:' + (pct || 0) + '%"></span></div>'
           + '<dl class="kv">'
           + '<dt>Parent</dt><dd class="linkish" data-addr="' + parent.addr + '">' + escapeHtml(parent.name) + '</dd>'
-          + '<dt>Transmissions</dt><dd>' + (link.sample || 0).toLocaleString() + '</dd>'
-          + '<dt>Failed</dt><dd>' + (link.txError || 0).toLocaleString() + '</dd>'
+          + (link.sample != null
+            ? '<dt>Transmissions</dt><dd>' + link.sample.toLocaleString() + '</dd>'
+              + '<dt>Failed</dt><dd>' + (link.txError || 0).toLocaleString() + '</dd>'
+            : '')
           + '</dl>'
-          + (link.grade === 'unknown'
-            ? '<p class="note">Too few transmissions to judge this link yet.</p>' : ''));
+          + '<p class="note">' + escapeHtml(link.summary || '') + '</p>');
       }
 
       /** How well the devices hanging off this one are doing. */
       function downlinkSection(n) {
         var links = state.graph.links
           .filter(function (l) { return l.kind === 'route' && l.source === n.addr; })
-          .sort(function (a, b) { return (a.rate == null ? 2 : a.rate) - (b.rate == null ? 2 : b.rate); });
+          .sort(function (a, b) { return score(a) - score(b); });
         if (!links.length) return '';
 
         var rows = links.map(function (l) {
@@ -1228,13 +1288,18 @@
             + '<span class="q-dot q-' + l.grade + '"></span>'
             + '<span class="wl-name">' + escapeHtml(shortName(child.name)) + '</span>'
             + '<span class="wl-rate q-text-' + l.grade + '">'
-            + (l.rate == null ? '—' : Math.round(l.rate * 100) + '%') + '</span></li>';
+            + escapeHtml(l.label || '—') + '</span></li>';
         }).join('');
         return section('Links to children (' + links.length + ')',
           '<ul class="linklist">' + rows + '</ul>');
       }
 
       function routeSection(n) {
+        if (n.isCoordinator && state.network !== 'zigbee') {
+          return section('Homey', '<dl class="kv">' + (state.graph.controller.facts || []).map(function (f) {
+            return '<dt>' + escapeHtml(f.label) + '</dt><dd class="mono">' + escapeHtml(f.value) + '</dd>';
+          }).join('') + '</dl>');
+        }
         if (n.isCoordinator) {
           var c = state.graph.controller;
           return section('Controller',
@@ -1248,21 +1313,25 @@
             + '</dl>');
         }
         if (!n.path) {
-          return section('Route to Homey', '<p class="note">No route in the controller\'s routing '
-            + 'table — the device is unreachable, or has not been contacted since the last restart.</p>');
+          return section('Route to Homey', '<p class="note">' + (state.network === 'zigbee'
+            ? 'No route in the controller\'s routing table — the device is unreachable, or has not '
+              + 'been contacted since the last restart.'
+            : 'No device reported a link to it, so its place in the mesh isn\'t known.') + '</p>');
         }
         var items = n.path.map(function (addr, i) {
           var hop = state.byAddr[addr];
           var color = hop ? hopColor(hop) : css('--ghost');
           var grade = i === 0 ? null : (hop && hop.uplinkGrade) || 'unknown';
-          var rate = (i === 0 || !hop || hop.uplinkRate == null)
-            ? '' : Math.round(hop.uplinkRate * 100) + '%';
+          var into = i === 0 ? null : state.graph.links.filter(function (l) {
+            return l.kind === 'route' && l.source === n.path[i - 1] && l.target === addr;
+          })[0];
+          var rate = into && into.label && into.label !== '—' ? into.label : '';
           return '<li>'
             + '<span class="step" style="background:' + color + '">' + (i === 0 ? 'H' : i) + '</span>'
             + '<span class="rname linkish" data-addr="' + addr + '">'
             + escapeHtml(hop ? shortName(hop.name) : '0x' + addr.toString(16)) + '</span>'
-            + (grade ? '<span class="wl-rate q-text-' + grade + '">' + rate + '</span>' : '')
-            + '<span class="raddr">0x' + addr.toString(16) + '</span>'
+            + (grade ? '<span class="wl-rate q-text-' + grade + '">' + escapeHtml(rate) + '</span>' : '')
+            + '<span class="raddr">' + escapeHtml(hop ? hop.addrLabel : '0x' + addr.toString(16)) + '</span>'
             + '</li>';
         });
         return section('Route to Homey (' + n.hops + (n.hops === 1 ? ' hop' : ' hops') + ')',
@@ -1540,7 +1609,36 @@
           window.visualViewport.addEventListener('resize', scheduleResize);
         }
 
+        // The network picker. The choice is this viewer's own, so it is kept in
+        // the browser rather than in the app's settings.
+        var pick = document.getElementById('network');
+        try {
+          var saved = localStorage.getItem(NETWORK_KEY);
+          if (MEASURED[saved]) state.network = saved;
+        } catch (err) { /* storage may be off; Zigbee it is */ }
+        pick.value = state.network;
+        showNetworkTools();
+        pick.addEventListener('change', function () {
+          state.network = pick.value;
+          try {
+            localStorage.setItem(NETWORK_KEY, state.network);
+          } catch (err) { /* ignore */ }
+          state.selected = null;
+          renderDetail(null);
+          view.placed = false;
+          showNetworkTools();
+          load();
+        });
+
         load();
+      }
+
+      /** Stale routes, bindings and the raw controller data are Zigbee's alone. */
+      function showNetworkTools() {
+        var zigbee = state.network === 'zigbee';
+        document.getElementById('ghosts').hidden = !zigbee;
+        if (!zigbee) document.getElementById('bindings').hidden = true;
+        document.querySelector('.raw').hidden = !zigbee;
       }
 
       window.onHomeyReady = onHomeyReady;

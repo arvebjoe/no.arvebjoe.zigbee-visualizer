@@ -11,14 +11,16 @@ and no devices of its own; it reads the Zigbee state through the Web API and dra
 
 There are three front ends over the same data:
 
-- **Settings page** (`settings/index.html`): the map inside the Homey app. It calls the app's API routes
-  (`api.ts`, declared under `api` in the manifest: `/network`, `/state`, `/visualizer`) through
+- **Settings page** (`settings/index.html`): the map inside the Homey app, with the same network picker
+  as the browser view at the top (the choice is kept in the viewer's localStorage). It calls the app's API routes
+  (`api.ts`, declared under `api` in the manifest: `/network?network=zigbee|thread|zwave`, `/state`, `/visualizer`) through
   `Homey.api`, and holds the **Browser view** switch (`Homey.get/set('webServer')`).
 - **Browser view** (`web/`): the full visualizer, served by the app itself on port 8154
   (`lib/web-server.ts`), with snapshot history, a Changes tab, route history, export and dump import.
   **Off until the user switches it on**, because it has no login; `app.ts` starts and stops the server
   as the `webServer` setting changes.
-- **Dashboard widget** (`widgets/network-map/`): a small read-only map for Homey dashboards. Its own API
+- **Dashboard widget** (`widgets/network-map/`): a small read-only map for Homey dashboards, of the
+  network picked in its settings (`network`: zigbee, thread or zwave). Its own API
   (`api.ts`, declared in `widget.compose.json`; the CLI compiles it to `.homeybuild/widgets/network-map/api.js`)
   returns the graph already laid out, so the page only scales and draws it. Tap a device to see its
   route; it never pans or zooms, so a swipe over it still scrolls the dashboard. The previews
@@ -28,9 +30,20 @@ There are three front ends over the same data:
 
 - `app.ts` — the app: fetches the state with `HomeyAPI.createAppAPI` (needs the `homey:manager:api`
   permission, which makes store review slower), wires the web server and the snapshots together.
-- `lib/zigbee-graph.ts` — `buildGraph()`, **the only graph builder**. The settings page and the browser
-  view both get graphs from it; the browser never parses raw state. Keep it that way: a second copy in
-  `web/` existed once and drifted.
+- `lib/graph.ts` — the graph model every front end draws, for every network: Homey at address 0, a
+  route and a quality grade per device. Each link carries its own `label`, `summary` and `score`, so
+  the pages never need to know how a network grades its hops.
+- `lib/zigbee-graph.ts`, `lib/thread-graph.ts`, `lib/zwave-graph.ts` — **the only graph builders**, one
+  per network. The settings page and the browser view both get graphs from them; the browser never
+  parses raw state. Keep it that way: a second copy in `web/` existed once and drifted.
+  - Thread & Matter: routers and children from `thread.getNetworkTopology()`, names and diagnostics
+    from Matter; routes are the cheapest path from Homey's border router over the reported links.
+    Matter over Wi-Fi/Ethernet hangs straight off Homey.
+  - Z-Wave: a star. Apps can't read the mesh (`runCommand getNetworkTopology` needs a scope apps
+    don't get), so each device is joined straight to Homey, graded by TX counters.
+- `lib/networks.ts` — `buildNetworkGraph(network, states)`, `fetchStates()` (live, from the Web API)
+  and `probeStates()` (from a probe dump, which the browser view's Load dialog also accepts).
+  Snapshots, the Changes tab, route history and the export are still Zigbee only.
 - `lib/widget-view.ts` — `buildWidgetView()`: the widget's view of a graph, with the settings page's
   radial-tree layout done on the Homey. The settings page still has its own copy of that layout in
   its script.

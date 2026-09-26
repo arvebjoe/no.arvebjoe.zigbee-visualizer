@@ -4,6 +4,10 @@ import type http from 'http';
 import Homey from 'homey';
 import { HomeyAPI } from 'homey-api';
 import { buildGraph, Graph, ZigbeeState } from './lib/zigbee-graph';
+import { isNetworkId, NetworkId } from './lib/graph';
+import {
+  buildNetworkGraph, fetchStates, isProbe, NetworkApi, probeStates,
+} from './lib/networks';
 import { startWebServer, urlHost } from './lib/web-server';
 import {
   DEFAULT_SETTINGS, SnapshotSettings, Snapshots, toSettings,
@@ -29,11 +33,7 @@ const SETTINGS_KEY = 'snapshots';
 const WEB_SERVER_KEY = 'webServer';
 
 /** The slice of the Web API client this app uses. */
-type HomeyApiClient = {
-  zigbee: {
-    getState(): Promise<ZigbeeState>;
-  };
-};
+type HomeyApiClient = NetworkApi;
 
 module.exports = class NetworkVisualizerApp extends Homey.App {
 
@@ -95,7 +95,7 @@ module.exports = class NetworkVisualizerApp extends Homey.App {
     this.webServer = startWebServer({
       port: WEB_PORT,
       log: this.log.bind(this),
-      getGraph: () => this.getZigbeeGraph(),
+      getGraph: (network) => this.getGraph(network),
       listSnapshots: async () => this.snapshots?.overview() ?? { snapshots: [] },
       readGraph: (id) => this.getSnapshotGraph(id),
       listRoutes: async () => this.snapshots?.routes() ?? [],
@@ -148,7 +148,7 @@ module.exports = class NetworkVisualizerApp extends Homey.App {
    */
   async getZigbeeState(): Promise<ZigbeeState> {
     const api = await this.getApi();
-    const state = await api.zigbee.getState();
+    const state = await api.zigbee.getState() as ZigbeeState;
 
     this.log(`Fetched Zigbee state: ${Object.keys(state?.nodes ?? {}).length} nodes, `
       + `${Object.keys(state?.controllerState?.routes ?? {}).length} routes`);
@@ -157,16 +157,25 @@ module.exports = class NetworkVisualizerApp extends Homey.App {
   }
 
   /**
-   * The same data as a graph: every device, the links between them, the route
-   * the controller uses to reach each one, and a quality grade per hop.
+   * One network as a graph: every device, the links between them, the route
+   * Homey uses to reach each one, and a quality grade per hop. Anything that
+   * isn't a network id is taken as Zigbee, as it was before there were others.
    */
-  async getZigbeeGraph(): Promise<Graph> {
-    const graph = buildGraph(await this.getZigbeeState());
+  async getGraph(network: unknown = 'zigbee'): Promise<Graph> {
+    const id: NetworkId = isNetworkId(network) ? network : 'zigbee';
+    const graph = id === 'zigbee'
+      ? buildGraph(await this.getZigbeeState())
+      : buildNetworkGraph(id, await fetchStates(await this.getApi(), id));
 
-    this.log(`Built graph: ${graph.meta.deviceCount} devices, ${graph.links.length} links, `
+    this.log(`Built ${id} graph: ${graph.meta.deviceCount} devices, ${graph.links.length} links, `
       + `${graph.meta.weakLinkCount} weak`);
 
     return graph;
+  }
+
+  /** The Zigbee network as a graph; kept for the widget and the settings page's older route. */
+  async getZigbeeGraph(): Promise<Graph> {
+    return this.getGraph('zigbee');
   }
 
   /** A saved snapshot or imported dump as a graph; null when there is none by that id. */
@@ -182,6 +191,7 @@ module.exports = class NetworkVisualizerApp extends Homey.App {
    */
   async importDump(input: unknown, remember: boolean) {
     if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+    if (isProbe(input)) return this.importProbe(input);
     const dump = input as ZigbeeState;
     if (!dump.nodes && !dump.controllerState) return null;
 
@@ -194,6 +204,22 @@ module.exports = class NetworkVisualizerApp extends Homey.App {
     }
     const saved = remember ? await this.snapshots?.saveImport(dump) : undefined;
     return { graph, stripped, id: saved?.id ?? null };
+  }
+
+  /**
+   * The graphs of a probe dump (lib/probe.ts), one per network in it: how a
+   * Thread or Z-Wave network from someone else's Homey is looked at. A probe is
+   * already stripped of its secrets, and is not kept on the Homey.
+   */
+  importProbe(input: object) {
+    // A probe leaves secrets out already, but this one may not have come from this app.
+    const stripped = stripSecrets(input);
+    const states = probeStates(input);
+    const graphs: Partial<Record<NetworkId, Graph>> = {};
+    if (states.zigbee) graphs.zigbee = buildGraph(states.zigbee);
+    if (states.thread?.topology || states.thread?.matterNodes) graphs.thread = buildNetworkGraph('thread', states);
+    if (states.zwave?.state) graphs.zwave = buildNetworkGraph('zwave', states);
+    return { graphs, stripped, id: null };
   }
 
   /** Validates, stores and applies new snapshot settings; null when they are not valid. */
