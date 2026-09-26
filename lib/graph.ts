@@ -68,8 +68,14 @@ export type GraphNode = {
   probablyWas?: number[];
   /** On a device: the stale route entry it most likely left behind, by its address. */
   staleAddr?: number;
-  /** A stable id that survives an address change: the IEEE address on Zigbee. */
+  /** The device's own hardware address: the IEEE address on Zigbee, the extended address on Thread. */
   ieeeAddr: string | null;
+  /**
+   * What the history follows the device by, where the hardware address won't
+   * do: on Thread, a Matter device's node id. Falls back to `ieeeAddr`; a device
+   * with neither can't be followed from one snapshot to the next.
+   */
+  key?: string;
   name: string;
   /** 'router', 'enddevice', 'ghost', …; routers are drawn as squares. */
   type: string;

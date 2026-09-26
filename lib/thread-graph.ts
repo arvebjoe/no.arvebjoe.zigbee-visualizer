@@ -260,6 +260,7 @@ export function buildThreadGraph(input: ThreadInput): Graph {
     path: [0],
     addrLabel: homeyRloc != null ? hex(homeyRloc) : '—',
     nwkAddr: homeyRloc ?? 0,
+    key: 'homey',
   };
   byAddr.set(0, homey);
 
@@ -272,6 +273,8 @@ export function buildThreadGraph(input: ThreadInput): Graph {
       nwkAddr: t.rloc,
       addrLabel: hex(t.rloc),
       ieeeAddr: t.extendedAddress ?? null,
+      // A child's RLOC16 changes with its parent, and it has no other address to go by.
+      key: isRouter && t.extendedAddress ? `ext:${t.extendedAddress}` : undefined,
       facts: [{ label: 'Thread role', value: isRouter ? 'Router' : 'Child' }],
       note: isRouter ? 'Not a Matter device of this Homey, so only Thread knows it.' : undefined,
     };
@@ -337,6 +340,7 @@ export function buildThreadGraph(input: ThreadInput): Graph {
       modelId: info.productName,
       swBuildId: info.softwareVersionString,
       ownerUri: homeyIds[0] ? `homey:device:${homeyIds[0]}` : undefined,
+      key: `matter:${m.id ?? m.nodeId}`,
       facts,
     };
 
@@ -489,4 +493,67 @@ export function buildThreadGraph(input: ThreadInput): Graph {
       notice: topology.length ? undefined : 'Homey reported no Thread network.',
     },
   });
+}
+
+/**
+ * The input cut down to the fields buildThreadGraph() reads, for keeping in the
+ * history: a Matter node carries its whole endpoint and subscription tree,
+ * which makes a snapshot many times the size it needs to be.
+ */
+export function trimThreadInput(input: ThreadInput): ThreadInput {
+  const nodes = matterList(input.matterNodes).map((m) => ({
+    id: m.id,
+    nodeId: m.nodeId,
+    bridgeDeviceId: m.bridgeDeviceId,
+    basicInformation: {
+      vendorName: m.basicInformation?.vendorName,
+      productName: m.basicInformation?.productName,
+      softwareVersionString: m.basicInformation?.softwareVersionString,
+    },
+    network: m.network,
+    ipAddress: m.ipAddress,
+    devices: (m.devices ?? []).map((d) => ({ homeyDeviceId: d.homeyDeviceId })),
+    hasLeftFabric: m.hasLeftFabric,
+  }));
+
+  const diagnostics: NonNullable<ThreadInput['diagnostics']> = {};
+  Object.entries(input.diagnostics ?? {}).forEach(([id, d]) => {
+    const t = d.thread;
+    diagnostics[id] = {
+      thread: t ? {
+        networkName: t.networkName,
+        panId: t.panId,
+        extendedPanId: t.extendedPanId,
+        channel: t.channel,
+        routingRole: t.routingRole,
+        neighborTable: (t.neighborTable ?? []).map((n) => ({
+          extAddress: n.extAddress,
+          rloc16: n.rloc16,
+          lqi: n.lqi,
+          averageRssi: n.averageRssi,
+          frameErrorRate: n.frameErrorRate,
+        })),
+        routeTable: (t.routeTable ?? []).map((r) => ({
+          rloc16: r.rloc16, LQIIn: r.LQIIn, LQIOut: r.LQIOut, linkEstablished: r.linkEstablished,
+        })),
+      } : null,
+      wifi: d.wifi ? { channel: d.wifi.channel, rssi: d.wifi.rssi } : null,
+    };
+  });
+
+  // Only the names of the Matter devices: the rest of the Homey's devices never show up here.
+  const deviceNames: Record<string, string> = {};
+  nodes.forEach((m) => m.devices.forEach(({ homeyDeviceId }) => {
+    const name = homeyDeviceId && input.deviceNames?.[homeyDeviceId];
+    if (name) deviceNames[homeyDeviceId as string] = name;
+  }));
+
+  return {
+    state: input.state,
+    topology: input.topology,
+    matterNodes: nodes,
+    diagnostics,
+    deviceNames,
+    error: input.error,
+  };
 }

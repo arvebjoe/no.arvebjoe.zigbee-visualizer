@@ -43,12 +43,14 @@ There are three front ends over the same data:
     don't get), so each device is joined straight to Homey, graded by TX counters.
 - `lib/networks.ts` — `buildNetworkGraph(network, states)`, `fetchStates()` (live, from the Web API)
   and `probeStates()` (from a probe dump, which the browser view's Load dialog also accepts).
-  Snapshots, the Changes tab, route history and the export are still Zigbee only.
+  Z-Wave keeps no history, and the export is Zigbee only.
 - `lib/widget-view.ts` — `buildWidgetView()`: the widget's view of a graph, with the settings page's
   radial-tree layout done on the Homey. The settings page still has its own copy of that layout in
   its script.
-- `lib/snapshots.ts` — the history, in `/userdata/snapshots/` (the one writable folder; it survives
-  updates). A snapshot is `<UTC time>.json`, e.g. `2026-09-24T12-00-00Z.json`, so sorting by name is
+- `lib/snapshots.ts` — the history, one `Snapshots` per network on the same settings: Zigbee's in
+  `/userdata/snapshots/` (the one writable folder; it survives updates), Thread's in
+  `/userdata/snapshots/thread/`, cut down by `trimThreadInput()`. Route history follows a device by its
+  graph `key` (a Matter node id on Thread), else its IEEE address. A snapshot is `<UTC time>.json`, e.g. `2026-09-24T12-00-00Z.json`, so sorting by name is
   sorting by time. Dumps imported in the browser live in the same folder as `import-<UTC time>.json`,
   and the prefix keeps them out of `list()`: they are not part of the timeline, the route history or the
   export. Settings are stored under the app setting `snapshots`; changing the interval deletes the

@@ -4,7 +4,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import type Homey from 'homey';
 import toSafeJson from './safe-json';
-import { buildGraph, ZigbeeState } from './zigbee-graph';
+import type { Graph } from './graph';
 
 /** One "hour" of the interval. Set it to 60 * 1000 to test in minutes instead. */
 export const HOUR_MS = 60 * 60 * 1000;
@@ -38,7 +38,10 @@ export type SnapshotOptions = {
   homey: Homey.App['homey'];
   dir: string;
   settings: SnapshotSettings;
-  getState: () => Promise<unknown>;
+  /** The state to save; null when there is nothing to save, e.g. a Homey without that network. */
+  getState: () => Promise<unknown | null>;
+  /** A saved state as a graph, for the route history. */
+  toGraph: (state: unknown) => Graph;
   log: (message: string) => void;
 };
 
@@ -47,7 +50,7 @@ export type SnapshotInfo = {
   takenAt: string;
 };
 
-/** Who was whose parent in one snapshot, by IEEE address. */
+/** Who was whose parent in one snapshot, by each device's key (on Zigbee, its IEEE address). */
 export type SnapshotRoutes = SnapshotInfo & {
   /** device -> its parent, or null when the controller had no route to it */
   parents: Record<string, string | null>;
@@ -55,18 +58,18 @@ export type SnapshotRoutes = SnapshotInfo & {
   names: Record<string, string>;
 };
 
-/** The parents and names in one Zigbee state, as SnapshotRoutes carries them. */
-function routesOf(state: ZigbeeState): Pick<SnapshotRoutes, 'parents' | 'names'> {
-  const graph = buildGraph(state);
+/** The parents and names in one graph, as SnapshotRoutes carries them. */
+function routesOf(graph: Graph): Pick<SnapshotRoutes, 'parents' | 'names'> {
   const byAddr = new Map(graph.nodes.map((n) => [n.addr, n]));
+  const keyOf = (n: Graph['nodes'][number] | undefined) => n?.key ?? n?.ieeeAddr ?? null;
   const parents: Record<string, string | null> = {};
   const names: Record<string, string> = {};
   graph.nodes.forEach((n) => {
-    if (!n.ieeeAddr || n.isGhost) return;
-    names[n.ieeeAddr] = n.name;
+    const key = keyOf(n);
+    if (!key || n.isGhost) return;
+    names[key] = n.name;
     if (n.isCoordinator) return;
-    const parent = n.parent === undefined ? undefined : byAddr.get(n.parent);
-    parents[n.ieeeAddr] = parent?.ieeeAddr ?? null;
+    parents[key] = keyOf(n.parent === undefined ? undefined : byAddr.get(n.parent));
   });
   return { parents, names };
 }
@@ -105,7 +108,7 @@ function msSinceLocalMidnight(date: Date, timeZone: string): number {
   return ((part('hour') * 60 + part('minute')) * 60 + part('second')) * 1000 + date.getMilliseconds();
 }
 
-/** Saves the Zigbee state on every clock slot, and keeps only the newest few. */
+/** Saves one network's state on every clock slot, and keeps only the newest few. */
 export class Snapshots {
 
   private options: SnapshotOptions;
@@ -233,7 +236,7 @@ export class Snapshots {
       if (!r) {
         const json = await this.read(s.id);
         if (json === null) return null;
-        r = routesOf(JSON.parse(json) as ZigbeeState);
+        r = routesOf(this.options.toGraph(JSON.parse(json)));
         this.routeCache.set(s.id, r);
       }
       return { ...s, ...r };
@@ -245,13 +248,13 @@ export class Snapshots {
   }
 
   /** Every snapshot, parsed, oldest first. */
-  async states(): Promise<Array<{ takenAt: string; state: ZigbeeState }>> {
+  async states(): Promise<Array<{ takenAt: string; state: unknown }>> {
     const all = await this.list();
     const states = await Promise.all(all.map(async (s) => {
       const json = await this.read(s.id);
-      return json === null ? null : { takenAt: s.takenAt, state: JSON.parse(json) as ZigbeeState };
+      return json === null ? null : { takenAt: s.takenAt, state: JSON.parse(json) as unknown };
     }));
-    return states.filter((s): s is { takenAt: string; state: ZigbeeState } => s !== null);
+    return states.filter((s): s is { takenAt: string; state: unknown } => s !== null);
   }
 
   /** One snapshot's or imported dump's JSON text, or null if there is no such thing. */
@@ -277,7 +280,7 @@ export class Snapshots {
     }, wait);
   }
 
-  /** Saves the Zigbee state, unless the schedule `run` belongs to was stopped while it was read. */
+  /** Saves the state, unless the schedule `run` belongs to was stopped while it was read. */
   private async take(run: number): Promise<void> {
     const { dir, getState, log } = this.options;
     const id = idFor(new Date());
@@ -285,7 +288,7 @@ export class Snapshots {
 
     const state = await getState();
     // The settings may have changed meanwhile, and a new interval must not get an old one's snapshot.
-    if (run !== this.run) return;
+    if (run !== this.run || state === null) return;
 
     // Written under a temporary name first, so a half-written file never shows up in the list.
     await fs.writeFile(`${file}.tmp`, toSafeJson(state));

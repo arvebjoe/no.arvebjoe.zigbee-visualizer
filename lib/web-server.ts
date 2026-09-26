@@ -14,12 +14,12 @@ export type WebServerOptions = {
   log: (message: string) => void;
   /** One live network as a graph, built fresh for every request: 'zigbee', 'thread' or 'zwave'. */
   getGraph: (network: string | null) => Promise<unknown>;
-  /** Every saved snapshot, oldest first, with the interval the page needs to label them. */
-  listSnapshots: () => Promise<unknown>;
-  /** One snapshot or imported dump as a graph, or null if there is no such thing. */
-  readGraph: (id: string) => Promise<unknown | null>;
-  /** Who was whose parent in every snapshot, oldest first. */
-  listRoutes: () => Promise<unknown>;
+  /** One network's saved snapshots, oldest first, with the interval the page needs to label them. */
+  listSnapshots: (network: string | null) => Promise<unknown>;
+  /** One snapshot or imported dump as a graph, or null if there is no such thing. Imports are Zigbee's. */
+  readGraph: (id: string, network: string | null) => Promise<unknown | null>;
+  /** Who was whose parent in every snapshot of one network, oldest first. */
+  listRoutes: (network: string | null) => Promise<unknown>;
   /** Every snapshot plus the live state, summarised for analysis, as JSON text. */
   getExport: () => Promise<string>;
   /** Validates and applies new snapshot settings; resolves to null when they are not valid. */
@@ -131,7 +131,7 @@ function serveGraph(res: http.ServerResponse, network: string | null, { getGraph
 }
 
 /** Answers with the list of snapshots, or with one snapshot's graph when there is an id. */
-function serveSnapshots(res: http.ServerResponse, id: string | undefined, options: WebServerOptions) {
+function serveSnapshots(res: http.ServerResponse, id: string | undefined, network: string | null, options: WebServerOptions) {
   const { listSnapshots, readGraph, log } = options;
   const fail = (err: Error) => {
     log(`Could not read the snapshots: ${err.message}`);
@@ -139,12 +139,12 @@ function serveSnapshots(res: http.ServerResponse, id: string | undefined, option
   };
 
   if (!id) {
-    listSnapshots()
+    listSnapshots(network)
       .then((list) => send(res, 200, 'application/json; charset=utf-8', JSON.stringify(list)))
       .catch(fail);
     return;
   }
-  readGraph(id)
+  readGraph(id, network)
     .then((graph) => {
       if (graph === null) send(res, 404, 'text/plain; charset=utf-8', 'No such snapshot');
       else send(res, 200, 'application/json; charset=utf-8', JSON.stringify(graph));
@@ -176,8 +176,8 @@ function serveDeleteImport(res: http.ServerResponse, id: string, { deleteImport,
 }
 
 /** Answers with who was whose parent in every snapshot. */
-function serveRoutes(res: http.ServerResponse, { listRoutes, log }: WebServerOptions) {
-  listRoutes()
+function serveRoutes(res: http.ServerResponse, network: string | null, { listRoutes, log }: WebServerOptions) {
+  listRoutes(network)
     .then((routes) => send(res, 200, 'application/json; charset=utf-8', JSON.stringify(routes)))
     .catch((err: Error) => {
       log(`Could not read the snapshot routes: ${err.message}`);
@@ -345,10 +345,10 @@ export function startWebServer(options: WebServerOptions): http.Server {
       return;
     }
     if (pathname === '/api/graph') serveGraph(res, url.searchParams.get('network'), options);
-    else if (snapshot) serveSnapshots(res, snapshot[1], options);
-    else if (imported?.[1]) serveSnapshots(res, imported[1], options);
+    else if (snapshot) serveSnapshots(res, snapshot[1], url.searchParams.get('network'), options);
+    else if (imported?.[1]) serveSnapshots(res, imported[1], 'zigbee', options);
     else if (imported) serveImports(res, options);
-    else if (pathname === '/api/routes') serveRoutes(res, options);
+    else if (pathname === '/api/routes') serveRoutes(res, url.searchParams.get('network'), options);
     else if (pathname === '/api/export') serveExport(res, options);
     else if (pathname === '/api/probe') serveProbe(res, options);
     else serveFile(req, res);

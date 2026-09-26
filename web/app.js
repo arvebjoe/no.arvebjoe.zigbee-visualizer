@@ -16,6 +16,7 @@ const NETWORKS = {
     label: 'Zigbee',
     tabs: ['quality', 'traffic', 'changes'],
     history: true,
+    exportable: true,
     legend: [['good', 'Good — 95%+ TX success'], ['fair', 'Fair — 85–95%'], ['weak', 'Weak — 70–85%'],
       ['bad', 'Bad — under 70%'], ['unknown', 'Too little traffic to judge']],
     legendNote: 'Line thickness = traffic volume',
@@ -27,8 +28,9 @@ const NETWORKS = {
   },
   thread: {
     label: 'Thread & Matter',
-    tabs: ['quality'],
-    history: false,
+    tabs: ['quality', 'changes'],
+    history: true,
+    exportable: false,
     legend: [['good', 'Good — link quality 3 of 3'], ['fair', 'Fair — 2 of 3'], ['weak', 'Weak — 1 of 3'],
       ['bad', 'Bad — 0 of 3'], ['unknown', 'Not reported']],
     legendNote: 'Wi-Fi devices: by signal strength',
@@ -44,6 +46,7 @@ const NETWORKS = {
     label: 'Z-Wave',
     tabs: ['quality', 'traffic'],
     history: false,
+    exportable: false,
     legend: [['good', 'Good — 95%+ TX success'], ['fair', 'Fair — 85–95%'], ['weak', 'Weak — 70–85%'],
       ['bad', 'Bad — under 70%'], ['unknown', 'Too little traffic to judge']],
     legendNote: 'Line thickness = traffic volume',
@@ -230,7 +233,8 @@ const networkPick = document.getElementById('network');
 /** Sets the picker and everything that only one network has, without loading anything. */
 function setNetwork(network) {
   if (!NETWORKS[network]) return;
-  if (network !== state.network) {
+  const changed = network !== state.network;
+  if (changed) {
     state.selected = null;
     state.changes = null;
   }
@@ -238,6 +242,15 @@ function setNetwork(network) {
   networkPick.value = network;
   const zigbee = network === 'zigbee';
   document.getElementById('history').hidden = !NETWORKS[network].history;
+  // The download is the Zigbee history, summarised for analysis; there is no such summary for Thread yet.
+  document.getElementById('historyDownload').hidden = !NETWORKS[network].exportable;
+  if (changed) {
+    // Each network has its own snapshots; the list fills in again once they are read.
+    historySnapshots = null;
+    // Looked up here: the boot code picks the network before the history pane's own code has run.
+    document.getElementById('historyList').innerHTML = '<button class="history-item active" type="button" data-snap="" title="Live">●</button>';
+    if (NETWORKS[network].history) loadHistory();
+  }
   // Bindings and stale routing entries are Zigbee's alone.
   document.getElementById('showBindings').closest('label').hidden = !zigbee;
   document.getElementById('showGhosts').closest('label').hidden = !zigbee;
@@ -1472,13 +1485,17 @@ function routeChanges(routes) {
 }
 
 function loadHistory() {
+  const { network } = state;
+  if (!NETWORKS[network].history) return;
   const json = (res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`)));
   Promise.all([
-    fetch('api/snapshots').then(json),
+    fetch(`api/snapshots?network=${network}`).then(json),
     // Without the routes the pane still works, just without the change markers.
-    fetch('api/routes').then(json).catch(() => []),
+    fetch(`api/routes?network=${network}`).then(json).catch(() => []),
   ])
-    .then(([overview, routes]) => renderHistory(overview, routes))
+    .then(([overview, routes]) => {
+      if (state.network === network) renderHistory(overview, routes);
+    })
     .catch(() => { /* no history to show; the live view works without it */ });
 }
 
@@ -1486,7 +1503,7 @@ historyList.addEventListener('click', (e) => {
   const item = e.target.closest('[data-snap]');
   if (!item) return;
   const id = item.dataset.snap;
-  getJson(id ? `api/snapshots/${id}` : 'api/graph?network=zigbee')
+  getJson(id ? `api/snapshots/${id}?network=${state.network}` : `api/graph?network=${state.network}`)
     .then((graph) => {
       state.probe = null;
       historyActive = id;
@@ -1558,10 +1575,16 @@ document.getElementById('hsSave').addEventListener('click', () => {
 
 // ------------------------------------------------------------- changes ----
 
-/** Devices are matched on IEEE address: a network address can change on rejoin. */
+/**
+ * Devices are matched on their key (a Matter device's node id on Thread), else
+ * their IEEE address: a network address can change on rejoin.
+ */
 function nodeKey(n) {
-  return n.ieeeAddr || `nwk:${n.addr}`;
+  return n.key || n.ieeeAddr || `nwk:${n.addr}`;
 }
+
+/** What the route history follows a device by; null for one it can't follow. */
+const historyKey = (n) => n?.key || n?.ieeeAddr || null;
 
 /** Every device that moved to another parent, joined or left between two graphs. */
 function diffGraphs(before, now) {
@@ -1611,12 +1634,12 @@ function compareShown() {
   state.changes = null;
   applyHighlight();
   if (!state.selected) renderOverview();
-  // Snapshots are of the Zigbee network only.
-  if (state.network !== 'zigbee') return;
+  // Z-Wave keeps no snapshots.
+  if (!NETWORKS[state.network].history) return;
   const olderId = olderThan(historyActive);
   if (!olderId) return;
 
-  getJson(`api/snapshots/${olderId}`)
+  getJson(`api/snapshots/${olderId}?network=${state.network}`)
     .then((older) => {
       if (state.graph !== shown) return; // another snapshot was picked meanwhile
       state.changes = diffGraphs(older, shown);
@@ -1667,11 +1690,11 @@ const FLAP_THRESHOLD = 3;
 function loadRouteHistory(n) {
   const box = document.getElementById('routeHistory');
   if (!box) return;
-  if (state.network !== 'zigbee' || !n.ieeeAddr || n.isCoordinator || n.isGhost) {
+  if (!NETWORKS[state.network].history || !historyKey(n) || n.isCoordinator || n.isGhost) {
     box.remove();
     return;
   }
-  fetch('api/routes')
+  fetch(`api/routes?network=${state.network}`)
     .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
     .then((snapshots) => {
       if (state.selected !== n.addr || !box.isConnected) return; // another device was picked meanwhile
@@ -1684,15 +1707,16 @@ function routeHistoryHtml(n, snapshots) {
   const names = {};
   snapshots.forEach((s) => Object.assign(names, s.names));
 
-  // A parent is an IEEE address, null for "no route", or undefined for "not in the network".
+  // A parent is a device key, null for "no route", or undefined for "not in the network".
+  const key = historyKey(n);
   const points = snapshots.map((s) => ({
-    id: s.id, takenAt: s.takenAt, parent: n.ieeeAddr in s.parents ? s.parents[n.ieeeAddr] : undefined,
+    id: s.id, takenAt: s.takenAt, parent: key in s.parents ? s.parents[key] : undefined,
   }));
   if (historyActive === '') {
     // On the live view, what is on screen now counts as the newest point.
     const p = state.byAddr.get(n.parent);
-    points.push({ id: '', takenAt: new Date().toISOString(), parent: p ? p.ieeeAddr : null });
-    if (p) names[p.ieeeAddr] = p.name;
+    points.push({ id: '', takenAt: new Date().toISOString(), parent: historyKey(p) });
+    if (historyKey(p)) names[historyKey(p)] = p.name;
   }
   if (points.length < 2) return section('Route history', '<p class="note">Not enough snapshots yet to show a history.</p>');
 

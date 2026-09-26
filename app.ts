@@ -5,6 +5,7 @@ import Homey from 'homey';
 import { HomeyAPI } from 'homey-api';
 import { buildGraph, Graph, ZigbeeState } from './lib/zigbee-graph';
 import { isNetworkId, NetworkId } from './lib/graph';
+import { buildThreadGraph, ThreadInput, trimThreadInput } from './lib/thread-graph';
 import {
   buildNetworkGraph, fetchStates, isProbe, NetworkApi, probeStates,
 } from './lib/networks';
@@ -12,7 +13,7 @@ import { startWebServer, urlHost } from './lib/web-server';
 import {
   DEFAULT_SETTINGS, SnapshotSettings, Snapshots, toSettings,
 } from './lib/snapshots';
-import buildExport from './lib/export';
+import buildExport, { ExportPoint } from './lib/export';
 import { stripSecrets } from './lib/safe-json';
 import buildProbe, { ProbeApi } from './lib/probe';
 
@@ -21,6 +22,9 @@ const WEB_PORT = 8154;
 
 /** Where the snapshots are kept: /userdata is the one folder an app may write to, and it survives updates. */
 const SNAPSHOT_DIR = '/userdata/snapshots';
+
+/** Thread's snapshots, in a folder of their own inside Zigbee's: the Zigbee ones were there first. */
+const THREAD_SNAPSHOT_DIR = '/userdata/snapshots/thread';
 
 /** The key the snapshot settings are stored under in Homey's app settings. */
 const SETTINGS_KEY = 'snapshots';
@@ -40,8 +44,11 @@ module.exports = class NetworkVisualizerApp extends Homey.App {
   /** Resolves to a HomeyAPI instance; created once, reused after that. */
   private homeyApi?: Promise<HomeyApiClient>;
 
-  /** The history of the Zigbee state; set up in onInit. */
+  /** The history of the Zigbee state, and the imported dumps; set up in onInit. */
   private snapshots?: Snapshots;
+
+  /** The history of the Thread & Matter state, on the same settings as Zigbee's. */
+  private threadSnapshots?: Snapshots;
 
   /** The visualizer's web server, while the browser view is switched on. */
   private webServer?: http.Server;
@@ -55,15 +62,26 @@ module.exports = class NetworkVisualizerApp extends Homey.App {
   async onInit() {
     this.log('Network Visualizer has been initialized');
 
+    const settings = toSettings(this.homey.settings.get(SETTINGS_KEY)) ?? DEFAULT_SETTINGS;
     this.snapshots = new Snapshots({
       homey: this.homey,
       dir: SNAPSHOT_DIR,
-      settings: toSettings(this.homey.settings.get(SETTINGS_KEY)) ?? DEFAULT_SETTINGS,
+      settings,
       getState: () => this.getZigbeeState(),
+      toGraph: (state) => buildGraph(state as ZigbeeState),
       log: this.log.bind(this),
     });
-    this.snapshots.start()
-      .catch((err: Error) => this.log(`Snapshots could not start: ${err.message}`));
+    this.threadSnapshots = new Snapshots({
+      homey: this.homey,
+      dir: THREAD_SNAPSHOT_DIR,
+      settings,
+      getState: () => this.getThreadSnapshotState(),
+      toGraph: (state) => buildThreadGraph(state as ThreadInput),
+      log: (message) => this.log(`Thread: ${message}`),
+    });
+    [this.snapshots, this.threadSnapshots].forEach((history) => {
+      history.start().catch((err: Error) => this.log(`Snapshots could not start: ${err.message}`));
+    });
 
     // The settings page flips the switch; the server follows it without a restart.
     const onSetting = (key: string) => {
@@ -79,6 +97,7 @@ module.exports = class NetworkVisualizerApp extends Homey.App {
    */
   async onUninit() {
     this.snapshots?.stop();
+    this.threadSnapshots?.stop();
     this.webServerChange = this.webServerChange.then(() => this.closeWebServer());
     await this.webServerChange;
   }
@@ -96,9 +115,9 @@ module.exports = class NetworkVisualizerApp extends Homey.App {
       port: WEB_PORT,
       log: this.log.bind(this),
       getGraph: (network) => this.getGraph(network),
-      listSnapshots: async () => this.snapshots?.overview() ?? { snapshots: [] },
-      readGraph: (id) => this.getSnapshotGraph(id),
-      listRoutes: async () => this.snapshots?.routes() ?? [],
+      listSnapshots: async (network) => this.historyOf(network)?.overview() ?? { snapshots: [] },
+      readGraph: (id, network) => this.getSnapshotGraph(id, network),
+      listRoutes: async (network) => this.historyOf(network)?.routes() ?? [],
       getExport: () => this.getHistoryExport(),
       saveSettings: (input) => this.saveSnapshotSettings(input),
       listImports: async () => this.snapshots?.imports() ?? [],
@@ -178,10 +197,28 @@ module.exports = class NetworkVisualizerApp extends Homey.App {
     return this.getGraph('zigbee');
   }
 
+  /** The history of one network: Thread's, or else Zigbee's, which also holds the imported dumps. */
+  private historyOf(network: unknown): Snapshots | undefined {
+    return network === 'thread' ? this.threadSnapshots : this.snapshots;
+  }
+
+  /**
+   * The Thread & Matter state as a snapshot keeps it: cut down to what the
+   * graph needs. Null on a Homey without Thread or Matter, so it keeps no
+   * history of nothing.
+   */
+  async getThreadSnapshotState(): Promise<ThreadInput | null> {
+    const { thread } = await fetchStates(await this.getApi(), 'thread');
+    if (!thread || (!thread.topology?.length && !Object.keys(thread.matterNodes ?? {}).length)) return null;
+    return trimThreadInput(thread);
+  }
+
   /** A saved snapshot or imported dump as a graph; null when there is none by that id. */
-  async getSnapshotGraph(id: string): Promise<Graph | null> {
-    const json = await this.snapshots?.read(id);
-    return json == null ? null : buildGraph(JSON.parse(json) as ZigbeeState);
+  async getSnapshotGraph(id: string, network: unknown = 'zigbee'): Promise<Graph | null> {
+    const history = this.historyOf(network);
+    const json = await history?.read(id);
+    if (json == null) return null;
+    return network === 'thread' ? buildThreadGraph(JSON.parse(json) as ThreadInput) : buildGraph(JSON.parse(json) as ZigbeeState);
   }
 
   /**
@@ -229,12 +266,13 @@ module.exports = class NetworkVisualizerApp extends Homey.App {
     this.homey.settings.set(SETTINGS_KEY, settings);
     this.log(`Snapshot settings saved: ${JSON.stringify(settings)}`);
     await this.snapshots?.update(settings);
+    await this.threadSnapshots?.update(settings);
     return settings;
   }
 
   /** Every snapshot plus the live state, summarised for analysis, as the text of a JSON file. */
   async getHistoryExport(): Promise<string> {
-    const saved = (await this.snapshots?.states()) ?? [];
+    const saved = ((await this.snapshots?.states()) ?? []) as Array<Omit<ExportPoint, 'live'>>;
     const points = [
       ...saved.map((s) => ({ ...s, live: false })),
       { takenAt: new Date().toISOString(), live: true, state: await this.getZigbeeState() },
