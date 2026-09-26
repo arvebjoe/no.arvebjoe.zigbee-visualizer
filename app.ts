@@ -35,7 +35,7 @@ type HomeyApiClient = {
   };
 };
 
-module.exports = class ZigbeeVisualizerApp extends Homey.App {
+module.exports = class NetworkVisualizerApp extends Homey.App {
 
   /** Resolves to a HomeyAPI instance; created once, reused after that. */
   private homeyApi?: Promise<HomeyApiClient>;
@@ -53,7 +53,7 @@ module.exports = class ZigbeeVisualizerApp extends Homey.App {
    * onInit is called when the app is initialized.
    */
   async onInit() {
-    this.log('Zigbee Visualizer has been initialized');
+    this.log('Network Visualizer has been initialized');
 
     this.snapshots = new Snapshots({
       homey: this.homey,

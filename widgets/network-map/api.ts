@@ -5,7 +5,7 @@ import type { Graph } from '../../lib/zigbee-graph';
 import { buildWidgetView } from '../../lib/widget-view';
 
 /** The app instance, as far as this widget needs it. */
-type ZigbeeVisualizerApp = {
+type NetworkVisualizerApp = {
   getZigbeeGraph(): Promise<Graph>;
 };
 
@@ -22,7 +22,7 @@ module.exports = {
    * route entries in the picture.
    */
   async getView({ homey, query }: WidgetRequest) {
-    const app = homey.app as unknown as ZigbeeVisualizerApp;
+    const app = homey.app as unknown as NetworkVisualizerApp;
     return buildWidgetView(await app.getZigbeeGraph(), { ghosts: query.ghosts === '1' });
   },
 

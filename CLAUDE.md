@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 An [Athom Homey](https://homey.app) app (SDK 3, TypeScript) that maps the Homey's Zigbee mesh: every
 device, the route each takes back to Homey, and a quality grade per hop. It has no drivers, no flows
 and no devices of its own; it reads the Zigbee state through the Web API and draws it. The app id
-`no.arvebjoe.zigbee-visualizer` is the directory / package name and must stay in sync with the manifest.
+`no.arvebjoe.network-visualizer` is the directory / package name and must stay in sync with the manifest.
 
 There are three front ends over the same data:
 

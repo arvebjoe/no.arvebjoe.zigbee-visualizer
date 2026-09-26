@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 960" width="960" height="960">
-  <title>Zigbee Visualizer</title>
+  <title>Network Visualizer</title>
   <!-- A Zigbee mesh drawn as a constellation: three nodes joined by their
        links, the coordinator largest. Flat black on transparent, no gradient
        and no background, per the Homey App Store icon guidelines. -->
