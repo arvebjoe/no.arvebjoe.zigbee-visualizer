@@ -10,6 +10,15 @@
  * that fails, is recorded as an error in the dump rather than failing it.
  */
 
+/**
+ * The only Z-Wave commands the probe sends. runCommand is a general gateway that
+ * also reaches commands like factoryReset and removeNode, so the command is never
+ * taken from anywhere else. Both are what Homey's developer tools send on every
+ * load of the Z-Wave page: the mesh (each node's neighbours and its last working
+ * route, which getState doesn't have) and the nodes Homey counts as failed.
+ */
+const ZWAVE_READ_COMMANDS = ['getNetworkTopology', 'getFailedNodes'] as const;
+
 /** How long one call may take. The Web API's default is shorter than a slow Z-Wave state needs. */
 const CALL_TIMEOUT_MS = 30 * 1000;
 
@@ -39,7 +48,7 @@ const HEX_128 = /^(0x)?[0-9a-f]{32}$/i;
 type Call = (args?: Record<string, unknown>) => Promise<unknown>;
 export type ProbeApi = {
   zigbee?: { getState?: Call };
-  zwave?: { getState?: Call };
+  zwave?: { getState?: Call; runCommand?: Call };
   thread?: { getState?: Call; getNetworkTopology?: Call };
   matter?: {
     getState?: Call;
@@ -112,9 +121,10 @@ export function redact(value: unknown, redacted: string[], at = ''): unknown {
 /** Every network's raw state, with secrets left out, as the text of a JSON file. */
 export default async function buildProbe(api: ProbeApi, about: { appVersion: string; homeyVersion: string }): Promise<string> {
   // The networks don't depend on each other, so they are asked at the same time.
-  const [zigbee, zwave, threadState, threadTopology, matterState, matterNodes] = await Promise.all([
+  const [zigbee, zwave, zwaveTopology, zwaveFailed, threadState, threadTopology, matterState, matterNodes] = await Promise.all([
     attempt(api.zigbee?.getState),
     attempt(api.zwave?.getState),
+    ...ZWAVE_READ_COMMANDS.map((command) => attempt(api.zwave?.runCommand, { command })),
     attempt(api.thread?.getState),
     attempt(api.thread?.getNetworkTopology),
     attempt(api.matter?.getState),
@@ -125,7 +135,7 @@ export default async function buildProbe(api: ProbeApi, about: { appVersion: str
   const redacted: string[] = [];
   const networks = redact({
     zigbee: { state: zigbee },
-    zwave: { state: zwave },
+    zwave: { state: zwave, topology: zwaveTopology, failedNodes: zwaveFailed },
     thread: { state: threadState, topology: threadTopology },
     matter: { state: matterState, nodes: matterNodes, nodeNetworks: await matterNodeNetworks(api, ids) },
   }, redacted);
